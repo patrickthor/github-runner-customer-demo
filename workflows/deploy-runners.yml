@@ -1,0 +1,261 @@
+# ==============================================================================
+# Deploy GitHub Runners — Infrastructure + Scaler Function
+#
+# Copy this workflow into your project's .github/workflows/ directory.
+# It deploys the Terraform module and the scaler Function App code.
+#
+# Required GitHub configuration (Settings → Secrets and variables):
+#
+#   Secrets:
+#     AZURE_CLIENT_ID       — Service principal client ID (OIDC)
+#     AZURE_TENANT_ID       — Azure AD tenant ID
+#     AZURE_SUBSCRIPTION_ID — Target subscription ID
+#
+#   Variables:
+#     WORKLOAD              — e.g. runner
+#     ENVIRONMENT           — e.g. prod
+#     INSTANCE              — e.g. 001
+#     AZURE_LOCATION        — e.g. westeurope
+#     GH_ORG                — e.g. your-org
+#     GH_REPO               — e.g. your-org/your-repo
+#     RUNNER_MODULE_REF     — Git ref for the module (e.g. v3.0.0)
+#     RUNNER_WORKLOAD_ROLES — Comma-separated Azure roles for runner identity (optional)
+#     STATE_RESOURCE_GROUP  — Resource group for state storage (created if missing)
+#     STATE_STORAGE_ACCOUNT — Storage account name for Terraform state (created if missing)
+#     STATE_CONTAINER       — Blob container name (optional, default: tfstate)
+# ==============================================================================
+
+name: Deploy Runners
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/runners/**"
+      - ".github/workflows/deploy-runners.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Adjust this path to where your Terraform config lives
+  TF_WORKING_DIR: infra/runners
+  # Module source repo — the scaler function code is fetched from here
+  MODULE_REPO: patrickthor/github-runners
+  MODULE_REF: ${{ vars.RUNNER_MODULE_REF || 'v3.0.0' }}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Stage 1 — Terraform infrastructure
+  # ----------------------------------------------------------------------------
+  infra:
+    name: Infrastructure
+    runs-on: ubuntu-latest
+
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    outputs:
+      function_app_name: ${{ steps.tf-output.outputs.function_app_name }}
+      resource_group: ${{ steps.tf-output.outputs.resource_group_name }}
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false
+
+      - name: Generate terraform.tfvars
+        env:
+          WORKLOAD:               ${{ vars.WORKLOAD }}
+          ENVIRONMENT:            ${{ vars.ENVIRONMENT }}
+          INSTANCE:               ${{ vars.INSTANCE }}
+          LOCATION:               ${{ vars.AZURE_LOCATION }}
+          SUBSCRIPTION_ID:        ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          GH_ORG:                 ${{ vars.GH_ORG }}
+          GH_REPO:                ${{ vars.GH_REPO }}
+          RUNNER_WORKLOAD_ROLES:  ${{ vars.RUNNER_WORKLOAD_ROLES || '' }}
+        run: |
+          if [ -z "$RUNNER_WORKLOAD_ROLES" ]; then
+            ROLES_TF="[]"
+          else
+            ROLES_TF=$(echo "$RUNNER_WORKLOAD_ROLES" | jq -R 'split(",") | map(select(length > 0) | gsub("^\\s+|\\s+$"; ""))')
+          fi
+          cat > terraform.tfvars <<EOF
+          workload        = "$WORKLOAD"
+          environment     = "$ENVIRONMENT"
+          instance        = "$INSTANCE"
+          location        = "$LOCATION"
+          subscription_id = "$SUBSCRIPTION_ID"
+          github_org      = "$GH_ORG"
+          github_repo     = "$GH_REPO"
+          runner_workload_roles = $ROLES_TF
+          EOF
+
+      - name: Ensure state storage exists
+        env:
+          STATE_RG:        ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA:        ${{ vars.STATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
+          LOCATION:        ${{ vars.AZURE_LOCATION }}
+          CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if [ -z "$STATE_RG" ] || [ -z "$STATE_SA" ]; then
+            echo "::error::STATE_RESOURCE_GROUP and STATE_STORAGE_ACCOUNT variables must be set."
+            exit 1
+          fi
+
+          # Create resource group if it doesn't exist
+          az group create --name "$STATE_RG" --location "$LOCATION" -o none 2>/dev/null || true
+
+          # Create storage account if it doesn't exist
+          if ! az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" -o none 2>/dev/null; then
+            echo "Creating state storage account $STATE_SA..."
+            az storage account create \
+              --name "$STATE_SA" --resource-group "$STATE_RG" --location "$LOCATION" \
+              --sku Standard_LRS --allow-blob-public-access false -o none
+
+            # Grant the CI identity access to the new storage account
+            PRINCIPAL_ID=$(az ad sp show --id "$CLIENT_ID" --query id -o tsv)
+            STORAGE_ID=$(az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" --query id -o tsv)
+            az role assignment create \
+              --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
+              --role "Storage Blob Data Contributor" --scope "$STORAGE_ID" -o none
+            echo "Waiting 30s for role assignment to propagate..."
+            sleep 30
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+            --name "$STATE_CONTAINER" --account-name "$STATE_SA" \
+            --auth-mode login -o none 2>/dev/null || true
+
+      - name: Generate backend.hcl
+        env:
+          STATE_RG:        ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA:        ${{ vars.STATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
+        run: |
+          cat > backend.hcl <<EOF
+          resource_group_name  = "$STATE_RG"
+          storage_account_name = "$STATE_SA"
+          container_name       = "$STATE_CONTAINER"
+          key                  = "runners.tfstate"
+          use_oidc             = true
+          EOF
+
+      - name: Terraform init
+        run: terraform init -input=false -backend-config=backend.hcl -upgrade
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform apply
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Import runner image into ACR
+        run: |
+          ACR_SERVER=$(terraform output -raw acr_login_server)
+          ACR_NAME=$(echo "$ACR_SERVER" | cut -d. -f1)
+          az acr import \
+            --name "$ACR_NAME" \
+            --source ghcr.io/myoung34/docker-github-actions-runner:latest \
+            --image actions-runner:latest \
+            --force
+
+      - name: Capture outputs
+        id: tf-output
+        run: |
+          echo "function_app_name=$(terraform output -raw function_app_name)" >> "$GITHUB_OUTPUT"
+          echo "resource_group_name=$(terraform output -raw resource_group_name)" >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------------------------
+  # Stage 2 — Scaler Function App code
+  #
+  # Fetches the scaler function from the module repo and deploys it.
+  # The runner's public IP is temporarily whitelisted for deployment.
+  # ----------------------------------------------------------------------------
+  deploy-scaler:
+    name: Scaler Function
+    needs: infra
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Fetch scaler function code
+        run: |
+          curl -sL "https://github.com/${{ env.MODULE_REPO }}/archive/refs/tags/${{ env.MODULE_REF }}.tar.gz" \
+            | tar xz --strip-components=1 -C . "*/scaler-function"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org)
+          echo "ip=${RUNNER_IP}" >> "$GITHUB_OUTPUT"
+
+      - name: Whitelist runner IP on Function App
+        run: |
+          az functionapp config access-restriction add \
+            --resource-group "${{ needs.infra.outputs.resource_group }}" \
+            --name "${{ needs.infra.outputs.function_app_name }}" \
+            --rule-name "github-actions-deploy" \
+            --action Allow \
+            --ip-address "${{ steps.runner-ip.outputs.ip }}/32" \
+            --priority 50 \
+            -o none
+
+      - name: Build and deploy
+        working-directory: scaler-function
+        run: |
+          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          zip -r ../deploy.zip . \
+            -x "local.settings*.json" -x "__pycache__/*" -x "*.pyc" -x "DEPLOYMENT.md"
+
+          az functionapp deployment source config-zip \
+            --resource-group "${{ needs.infra.outputs.resource_group }}" \
+            --name "${{ needs.infra.outputs.function_app_name }}" \
+            --src ../deploy.zip \
+            --timeout 300
+
+      - name: Remove runner IP from Function App
+        if: always()
+        run: |
+          az functionapp config access-restriction remove \
+            --resource-group "${{ needs.infra.outputs.resource_group }}" \
+            --name "${{ needs.infra.outputs.function_app_name }}" \
+            --rule-name "github-actions-deploy" \
+            -o none || true
