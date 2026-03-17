@@ -31,7 +31,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "infra/runners/**"
+      - "*.tf"
+      - "*.tfvars"
       - ".github/workflows/deploy-runners.yml"
   workflow_dispatch:
 
@@ -41,7 +42,7 @@ permissions:
 
 env:
   # Adjust this path to where your Terraform config lives
-  TF_WORKING_DIR: infra/runners
+  TF_WORKING_DIR: .
   # Module source repo — the scaler function code is fetched from here
   MODULE_REPO: patrickthor/github-runners
   MODULE_REF: ${{ vars.RUNNER_MODULE_REF || 'v3.0.0' }}
