@@ -215,7 +215,7 @@ jobs:
       - name: Fetch scaler function code
         run: |
           curl -sL "https://github.com/${{ env.MODULE_REPO }}/archive/refs/tags/${{ env.MODULE_REF }}.tar.gz" \
-            | tar xz --strip-components=1 -C . "*/scaler-function"
+            | tar xz --wildcards --strip-components=1 -C . "*/scaler-function"
 
       - name: Setup Python
         uses: actions/setup-python@v5
