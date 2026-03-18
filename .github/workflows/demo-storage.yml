@@ -1,0 +1,75 @@
+name: Demo Storage Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Run terraform apply"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform Demo
+    runs-on:
+      - self-hosted
+      - azure
+      - container-instance
+
+    defaults:
+      run:
+        working-directory: examples/demo
+
+    env:
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_MSI: true
+      # ARM_CLIENT_ID is injected by the scaler function into the ACI container environment
+      # It holds the client ID of the runner_pull user-assigned managed identity
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          for attempt in 1 2 3; do
+            terraform init -upgrade && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          for attempt in 1 2 3; do
+            terraform plan -out=tfplan && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
+
+      - name: Terraform Apply
+        if: github.event_name == 'workflow_dispatch' && inputs.apply == true
+        run: |
+          for attempt in 1 2 3; do
+            terraform plan -out=tfplan && terraform apply -auto-approve tfplan && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
