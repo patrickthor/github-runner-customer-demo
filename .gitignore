@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Terraform local artifacts
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+
+# Sensitive / environment-specific Terraform config (use *.example counterparts)
+terraform.tfvars
+backend.hcl
+
+# Environment files
+*.tfvars.local
+*.auto.tfvars.local
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Azure Functions local files
+scaler-function/.python_packages/
+scaler-function/.venv/
+scaler-function/local.settings.json
+
+# Build artifacts
+*.zip
+
+# Temporary/debug scripts
+.tmp_*
+_test_*.py
