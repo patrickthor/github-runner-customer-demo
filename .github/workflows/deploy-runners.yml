@@ -28,12 +28,9 @@
 name: Deploy Runners
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "examples/runner-demo/**.tf"
-      - "examples/runner-demo/**.tfvars"
-      - ".github/workflows/deploy-runners.yml"
+  # Manual dispatch only. This workflow provisions the runner platform and
+  # applies Terraform against a live subscription, so a push to main must not
+  # trigger it on its own.
   workflow_dispatch:
 
 permissions:

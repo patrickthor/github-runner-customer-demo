@@ -66,7 +66,11 @@ Follow [step 2 in the main README](../../README.md#2-provision-azure-identity-an
 | `STATE_STORAGE_ACCOUNT` | `sttfstate1a2b` | Storage account name for Terraform state (created automatically if missing) |
 | `STATE_CONTAINER` | `tfstate` | Blob container name (optional, defaults to tfstate) |
 
-### 4. Push to main
+### 4. Run the deploy workflow
+
+**Actions → Deploy Runners → Run workflow.** All workflows in this repo are
+manual dispatch only — they apply Terraform against a live subscription, so
+nothing deploys on a push to `main`.
 
 The workflow is fully self-service. On the first run it will:
 - Create the state storage account and blob container (if they don't exist)
