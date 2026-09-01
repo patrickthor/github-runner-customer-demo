@@ -11,7 +11,6 @@ crash.log
 crash.*.log
 
 # Sensitive / environment-specific Terraform config (use *.example counterparts)
-terraform.tfvars
 backend.hcl
 
 # Environment files

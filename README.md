@@ -5,9 +5,12 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 ## Files
 
 ```
-├── main.tf                                  # Module call (reads from variables)
-├── variables.tf                             # Variable declarations
-├── versions.tf                             # Provider and backend configuration
+├── examples/
+│   ├── runner-demo/                         # Runner platform module usage
+│   │   ├── main.tf                          # Module call (reads from variables)
+│   │   ├── variables.tf                     # Variable declarations
+│   │   └── versions.tf                      # Provider and backend configuration
+│   └── storage-demo/                        # Self-hosted runner test (storage account)
 └── .github/workflows/deploy-runners.yml     # CI/CD workflow (generates tfvars from GitHub variables)
 ```
 
@@ -15,7 +18,7 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 
 ### 1. Copy files into your project
 
-Copy this directory into your project (e.g., as `infra/runners/`) and copy `.github/workflows/deploy-runners.yml` to your repo's `.github/workflows/`.
+Copy `examples/runner-demo/` into your project (e.g., as `infra/runners/`) and copy `.github/workflows/deploy-runners.yml` to your repo's `.github/workflows/`. If you copy to a different path, update `TF_WORKING_DIR` and the `push` path filters in the workflow accordingly.
 
 ### 2. Create Azure identity (one-time)
 
