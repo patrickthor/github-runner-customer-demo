@@ -26,7 +26,7 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 | `storage-demo` | `demo-storage.yml` | self-hosted ACI | Smoke test — proves runners have working Azure creds |
 | `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | Vends access via Entra groups, RBAC bindings and PIM policies |
 
-> `access-vending-demo` needs extra Graph and RBAC permissions on the runner identity before its first run — see [its README](examples/access-vending-demo/README.md#permissions-the-runner-identity-needs).
+> `access-vending-demo` authenticates with its own dedicated OIDC identity (`AZURE_VENDING_CLIENT_ID`), not the shared runner managed identity, and needs Graph plus RBAC permissions granted to it before the first run — see [its README](examples/access-vending-demo/README.md#the-vending-identity).
 
 ## Quick start
 

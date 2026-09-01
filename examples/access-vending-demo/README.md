@@ -56,9 +56,37 @@ It holds no credentials. `tenant_id` and `provider_subscription_id` come from Gi
 
 On `apply` the job summary prints the contract for the access-package repo — group names, access types, approver groups, system owners, and the SCIM work list.
 
-### Permissions the runner identity needs
+### The vending identity
 
-This is the part that will block a first run. The workflow authenticates as the ACI runner's managed identity, which the runner module creates with least privilege. It needs:
+This workflow uses a **dedicated OIDC federated identity**, separate from the `AZURE_CLIENT_ID` that deploys the runner platform. Set its client ID as the repository secret `AZURE_VENDING_CLIENT_ID`.
+
+**Why not the runner's managed identity.** The runner identity is attached to the ACI *container*, so it is shared by every job that lands on the pool. Granting it `Group.ReadWrite.All` would let any workflow on those runners manage any group in the tenant, and permissions would only accumulate as workloads are added. A federated credential is scoped to *this repository* by its `subject`, and the token is minted per run and expires with it — so these permissions belong to this workload alone. Note this is about identity scoping, not the runner type: OIDC works identically on the self-hosted pool and on `ubuntu-latest`, since `id-token: write` is available on both.
+
+#### Create it (one-time)
+
+```bash
+APP_NAME=sp-access-vending
+GITHUB_ORG=<your-org>
+GITHUB_REPO=github-runner-customer-demo   # repo name only, not org/repo
+
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+CLIENT_ID=$(az ad app create --display-name $APP_NAME --query appId -o tsv)
+az ad sp create --id $CLIENT_ID
+PRINCIPAL_ID=$(az ad sp show --id $CLIENT_ID --query id -o tsv)
+
+# Federated credential — subject must match the repo and ref exactly
+az ad app federated-credential create --id $CLIENT_ID --parameters "{
+  \"name\": \"github-actions-main\",
+  \"issuer\": \"https://token.actions.githubusercontent.com\",
+  \"subject\": \"repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main\",
+  \"audiences\": [\"api://AzureADTokenExchange\"]
+}"
+
+echo "AZURE_VENDING_CLIENT_ID: $CLIENT_ID"
+```
+
+#### Grant it permissions
 
 **Microsoft Graph** (application permissions, admin consent required):
 - `Group.ReadWrite.All`
@@ -66,13 +94,30 @@ This is the part that will block a first run. The workflow authenticates as the 
 - `RoleManagementPolicy.ReadWrite.AzureADGroup`
 - `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup`
 
+The module's own repo ships `bootstrap/grant-graph-permissions.sh`, which grants exactly this set — point it at `$CLIENT_ID`.
+
 **Azure RBAC:**
-- `User Access Administrator` on each vended subscription (only for `azure_pim` roles). `Role Based Access Control Administrator` is *not* enough — it covers role bindings but not PIM policies.
-- `Storage Blob Data Contributor` on the Terraform state storage account.
 
-The module's own repo ships `bootstrap/grant-graph-permissions.sh`, which grants exactly the Graph set above.
+```bash
+# State storage — without this, init fails with 403 AuthorizationPermissionMismatch.
+# deploy-runners.yml grants this to AZURE_CLIENT_ID only, never to this identity.
+az role assignment create \
+  --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" \
+  --scope $(az storage account show --name <STATE_STORAGE_ACCOUNT> \
+              --resource-group <STATE_RESOURCE_GROUP> --query id -o tsv)
 
-> **Security trade-off, stated plainly:** granting `Group.ReadWrite.All` to the *shared* runner identity means every workflow on these runners can manage every group in the tenant. Defensible for a demo; not for anything real. For production, run this on `ubuntu-latest` with a dedicated OIDC service principal — there's a commented block in the workflow showing how.
+# Only needed for azure_pim roles. "Role Based Access Control Administrator" is
+# NOT enough — it covers the role bindings but not the PIM policies.
+az role assignment create \
+  --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal \
+  --role "User Access Administrator" \
+  --scope /subscriptions/$SUBSCRIPTION_ID
+```
+
+> **Consider scoping the credential to a GitHub environment** rather than a branch. Change the `subject` to `repo:$GITHUB_ORG/$GITHUB_REPO:environment:access-vending`, create that environment with required reviewers, and add `environment: access-vending` to the job. The identity then can't be issued to a run nobody approved — an approval gate on the credential itself, which is proportionate for a pipeline that decides who can become Owner on a subscription.
+
+> **Keep `entra_role` disabled unless you need it.** It requires `RoleManagement.ReadWrite.Directory`, which lets this identity assign directory roles anywhere in the tenant — including to itself.
 
 ## State
 
@@ -81,7 +126,9 @@ Unlike `storage-demo`, this example uses **remote state** (`azurerm` backend). T
 - `storage-demo` is a throwaway test. Losing its state just orphans a resource group.
 - This config creates **persistent** Entra groups that another repo references by name, and it runs on **ephemeral** ACI runners whose filesystem disappears with the container. With local state every run would start empty and try to recreate groups that already exist.
 
-The workflow generates `backend.hcl` from the same `STATE_*` GitHub variables the runner platform uses, under a separate state key (`access-vending.tfstate`), so the two configurations never share a state file.
+The workflow generates `backend.hcl` from the same `STATE_*` GitHub variables the runner platform uses, under a separate state key (`access-vending.tfstate`), so the two configurations never share a state file. It authenticates with `use_oidc` and `use_azuread_auth` — the same federated identity as the providers, over RBAC rather than account keys.
+
+The state account itself is **not** created here; `deploy-runners.yml` creates it on its first run. This workflow only connects to it, which is why the vending identity needs `Storage Blob Data Contributor` granted separately.
 
 Locally: `terraform init -backend-config=backend.hcl`.
 
