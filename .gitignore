@@ -13,6 +13,18 @@ crash.*.log
 # Sensitive / environment-specific Terraform config (use *.example counterparts)
 backend.hcl
 
+# NOTE: terraform.tfvars is deliberately NOT ignored.
+#
+# examples/access-vending-demo/terraform.tfvars must be committed — for an
+# access-vending system the configuration IS the governance record: "who is
+# systemeier for prod" and "which roles need dual approval" belong in a reviewed
+# PR with history. Its deploy workflow fails fast if the file is missing.
+#
+# It holds no credentials: tenant_id and provider_subscription_id come from
+# GitHub secrets via TF_VAR_. If you ever re-add a broad *.tfvars rule above,
+# keep this exception so the access-vending deploy does not break.
+!examples/access-vending-demo/terraform.tfvars
+
 # Environment files
 *.tfvars.local
 *.auto.tfvars.local

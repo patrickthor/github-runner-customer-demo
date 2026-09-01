@@ -10,9 +10,23 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 │   │   ├── main.tf                          # Module call (reads from variables)
 │   │   ├── variables.tf                     # Variable declarations
 │   │   └── versions.tf                      # Provider and backend configuration
-│   └── storage-demo/                        # Self-hosted runner test (storage account)
-└── .github/workflows/deploy-runners.yml     # CI/CD workflow (generates tfvars from GitHub variables)
+│   ├── storage-demo/                        # Self-hosted runner test (storage account)
+│   └── access-vending-demo/                 # Entra groups + RBAC + PIM via access-vending module
+└── .github/workflows/
+    ├── deploy-runners.yml                   # Runner platform (generates tfvars from GitHub variables)
+    ├── demo-storage.yml                     # storage-demo, on self-hosted runners
+    └── deploy-access-vending.yml            # access-vending-demo, on self-hosted runners
 ```
+
+## Examples
+
+| Example | Workflow | Runs on | What it does |
+|---|---|---|---|
+| `runner-demo` | `deploy-runners.yml` | `ubuntu-latest` (OIDC) | Deploys the runner platform itself |
+| `storage-demo` | `demo-storage.yml` | self-hosted ACI | Smoke test — proves runners have working Azure creds |
+| `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | Vends access via Entra groups, RBAC bindings and PIM policies |
+
+> `access-vending-demo` needs extra Graph and RBAC permissions on the runner identity before its first run — see [its README](examples/access-vending-demo/README.md#permissions-the-runner-identity-needs).
 
 ## Quick start
 

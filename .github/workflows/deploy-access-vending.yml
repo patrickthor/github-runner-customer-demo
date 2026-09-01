@@ -1,0 +1,274 @@
+# ==============================================================================
+# Deploy Access Vending — Entra groups, RBAC bindings and PIM policies
+#
+# Runs on the self-hosted ACI runners provisioned by this repo, the same as
+# demo-storage.yml. Manual dispatch only: this configuration decides who can
+# become Owner on a subscription, so an accidental push to main must not change
+# it. Pick the action explicitly.
+#
+# ------------------------------------------------------------------------------
+# REQUIRED GITHUB CONFIGURATION  (Settings -> Secrets and variables -> Actions)
+#
+#   Secrets:
+#     AZURE_TENANT_ID          Entra tenant ID
+#     AZURE_SUBSCRIPTION_ID    Subscription the azurerm provider authenticates to
+#
+#   Variables (reused from the runner platform deploy):
+#     STATE_RESOURCE_GROUP     Resource group holding the state storage account
+#     STATE_STORAGE_ACCOUNT    Storage account for Terraform state
+#     STATE_CONTAINER          optional, default: tfstate
+#     VENDING_STATE_KEY        optional, default: access-vending.tfstate
+#
+# The state account is NOT created here. deploy-runners.yml already creates it on
+# first run; this workflow connects to it under a separate state key so the two
+# configurations never share a state file.
+#
+# ------------------------------------------------------------------------------
+# !! PERMISSIONS THE RUNNER IDENTITY NEEDS — READ BEFORE FIRST RUN !!
+#
+# This workflow authenticates as the ACI runner's user-assigned managed identity
+# (ARM_USE_MSI), exactly like demo-storage.yml. That identity is created by the
+# runner module with least privilege and will NOT have what this module needs.
+#
+# Microsoft Graph (application permissions, admin consent required):
+#     Group.ReadWrite.All
+#     User.Read.All
+#     RoleManagementPolicy.ReadWrite.AzureADGroup
+#     PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup
+#
+# Azure RBAC, on each vended subscription (only for azure_pim roles):
+#     User Access Administrator
+#     -- the tighter "Role Based Access Control Administrator" is NOT enough:
+#        it covers the role bindings but not the PIM policies.
+#
+# Azure RBAC, on the state storage account:
+#     Storage Blob Data Contributor
+#
+# SECURITY TRADE-OFF, stated plainly: granting Group.ReadWrite.All to the SHARED
+# runner identity means every workflow that runs on these runners can manage
+# every group in the tenant. For a demo that is a defensible shortcut. For
+# anything real, run this configuration on `ubuntu-latest` with a DEDICATED OIDC
+# service principal instead of the shared runner identity -- see the commented
+# block in the job below. The upstream module makes the same recommendation.
+#
+# The entra_role mechanism needs two further Graph permissions
+# (RoleManagement.ReadWrite.Directory and
+# RoleEligibilitySchedule.ReadWrite.Directory). The first lets the identity
+# assign directory roles anywhere in the tenant, including to itself. It is left
+# commented out in terraform.tfvars for that reason.
+#
+# ------------------------------------------------------------------------------
+# ORDER OF OPERATIONS
+#
+# This must apply BEFORE any access-package repo. Not only because the groups
+# must exist: for pim_for_groups the PIM policy must be written first, or the
+# access package resource-role picker offers only "Member" and not "Eligible
+# Member" -- giving standing membership instead of JIT, with nothing failing.
+# ==============================================================================
+
+name: Deploy Access Vending
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # State is a single file. Two concurrent runs give a lock conflict at best.
+  group: access-vending-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.action }}
+    runs-on:
+      - self-hosted
+      - azure
+      - container-instance
+
+    # For a real environment, swap the block above for a dedicated OIDC identity
+    # and drop ARM_USE_MSI below in favour of ARM_USE_OIDC + ARM_CLIENT_ID:
+    #
+    # runs-on: ubuntu-latest
+    #   env:
+    #     ARM_USE_OIDC: true
+    #     ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
+
+    defaults:
+      run:
+        working-directory: examples/access-vending-demo
+
+    env:
+      ARM_USE_MSI: true
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # ARM_CLIENT_ID is injected by the scaler function into the ACI container
+      # environment. It holds the client ID of the runner_pull user-assigned
+      # managed identity, and both the providers and the azurerm backend read it.
+
+      # Provider config comes from secrets, never from the committed tfvars.
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_provider_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          # >= 1.9 is a hard requirement: the module's validations use
+          # cross-variable references, which do not exist before 1.9.
+          terraform_version: "~> 1.9"
+          terraform_wrapper: false
+
+      - name: Check terraform.tfvars is present
+        run: |
+          if [ ! -f terraform.tfvars ]; then
+            echo "::error::terraform.tfvars not found. It must be COMMITTED — the access configuration is the governance record. If a broad *.tfvars rule was added to .gitignore, restore the exception for this path."
+            exit 1
+          fi
+          echo "Found terraform.tfvars ($(wc -l < terraform.tfvars) lines)"
+
+      - name: Generate backend.hcl
+        env:
+          STATE_RG: ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA: ${{ vars.STATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
+          STATE_KEY: ${{ vars.VENDING_STATE_KEY || 'access-vending.tfstate' }}
+        run: |
+          if [ -z "$STATE_RG" ] || [ -z "$STATE_SA" ]; then
+            echo "::error::STATE_RESOURCE_GROUP and STATE_STORAGE_ACCOUNT variables must be set. deploy-runners.yml creates the state account on its first run."
+            exit 1
+          fi
+
+          # use_azuread_auth: data-plane access via RBAC, not account keys.
+          # use_msi: authenticate as the runner's managed identity, matching the
+          # providers. The MI needs Storage Blob Data Contributor on the account.
+          cat > backend.hcl <<EOF
+          resource_group_name  = "$STATE_RG"
+          storage_account_name = "$STATE_SA"
+          container_name       = "$STATE_CONTAINER"
+          key                  = "$STATE_KEY"
+          use_azuread_auth     = true
+          use_msi              = true
+          EOF
+
+          echo "Backend: $STATE_SA/$STATE_CONTAINER/$STATE_KEY"
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: |
+          for attempt in 1 2 3; do
+            terraform init -input=false -backend-config=backend.hcl && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: inputs.action != 'destroy'
+        run: |
+          for attempt in 1 2 3; do
+            terraform plan -input=false -out=tfplan && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
+
+      - name: Terraform Plan (destroy)
+        if: inputs.action == 'destroy'
+        run: terraform plan -destroy -input=false -out=tfplan
+
+      # The demo escape hatch grants standing eligibility outside the access
+      # package flow. It must never reach a real environment.
+      - name: Verify no demo eligibility
+        if: inputs.action != 'destroy'
+        run: |
+          if terraform show -json tfplan | grep -q 'demo_eligible_user_principal_names":\["'; then
+            echo "::error::demo_eligible_user_principal_names is in use. That grants standing eligibility outside the access package flow and must not occur in CI."
+            exit 1
+          fi
+          echo "OK — no demo eligibility in plan."
+
+      - name: Plan summary
+        run: |
+          {
+            echo "### Terraform ${{ inputs.action }} — plan"
+            echo '```'
+            terraform show -no-color tfplan | tail -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply' || inputs.action == 'destroy'
+        run: |
+          for attempt in 1 2 3; do
+            terraform apply -auto-approve -input=false tfplan && exit 0
+            echo "Attempt $attempt/3 failed — retrying in 30s..."
+            sleep 30
+          done
+          echo "All attempts failed"
+          exit 1
+
+      - name: Output contract
+        if: inputs.action == 'apply'
+        run: |
+          {
+            echo "### Contract for the access-package repo"
+            echo ""
+            echo "Group names, keyed \`{scope}--{role}\`:"
+            echo '```json'
+            terraform output -json group_names
+            echo '```'
+            echo "Access type per group — set this on the resource role binding:"
+            echo '```json'
+            terraform output -json access_package_access_type
+            echo '```'
+            echo "Approver groups, keyed on scope (only scopes with a \`dual\` role):"
+            echo '```json'
+            terraform output -json approver_group_names
+            echo '```'
+            echo "System owners per scope — request-gate approvers:"
+            echo '```json'
+            terraform output -json systemeier_by_scope
+            echo '```'
+            echo "SCIM work list for target clouds (pim_for_groups only):"
+            echo '```json'
+            terraform output -json target_cloud_bindings
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post-destroy notes
+        if: inputs.action == 'destroy'
+        run: |
+          {
+            echo "### Destroy complete — two things Terraform did not undo"
+            echo ""
+            echo "**R4** — \`azuread_directory_role\` does nothing on destroy, so any Entra"
+            echo "directory roles activated by the \`entra_role\` mechanism remain activated"
+            echo "in the tenant."
+            echo ""
+            echo "**R1** — PIM onboarding is irreversible, and deleted groups can linger in"
+            echo "the PIM for Groups list for up to 24 hours. Re-applying with the same group"
+            echo "names shortly after may hit friction."
+          } >> "$GITHUB_STEP_SUMMARY"
