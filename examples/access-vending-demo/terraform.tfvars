@@ -50,13 +50,13 @@ access_scopes = {
     cloud = "azure"
 
     # REPLACE with a real subscription GUID before applying.
-    scope_id = "00000000-0000-0000-0000-000000000000"
+    scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
 
     # Two or more is strongly advised: an approver cannot approve their own
     # request, so a lone systemeier cannot activate their own "dual" role.
     systemeier = [
-      "demo.owner@example.com",
-      "demo.deputy@example.com",
+      "patrick.thor_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
+      "edgar.grane_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
     ]
 
     roles = {
@@ -110,7 +110,7 @@ access_scopes = {
     # Documentation only for pim_for_groups — no resource binds it.
     scope_id = "123456789012"
 
-    systemeier = ["demo.cloudowner@example.com"]
+    systemeier = ["patrick.thor_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com"]
 
     roles = {
       # Self-service activation, no approver.
