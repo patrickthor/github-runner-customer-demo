@@ -26,7 +26,7 @@ module "access_vending" {
   # to that tag — a SHA is immutable but tells you nothing about what changed.
   #
   #   SHA 442d028 — initial-setup @ 2026-09-01
-  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=442d028368a27f701477bfddfd2fa4f2f64d854e"
+  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=initial-setup"
 
   access_scopes = var.access_scopes
 
