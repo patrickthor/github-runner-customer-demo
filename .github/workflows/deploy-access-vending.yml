@@ -173,6 +173,26 @@ jobs:
           terraform_version: "~> 1.9"
           terraform_wrapper: false
 
+      # Terraform fetches the access-vending module by cloning it with git. That
+      # clone is anonymous by default, and anonymous requests from the runners'
+      # shared egress IP get rate-limited by GitHub. The response is an auth
+      # challenge, and because there is no terminal to prompt on the clone dies
+      # with "could not read Username for 'https://github.com'" — which reads like
+      # a private-repo problem but is not.
+      #
+      # GITHUB_TOKEN can read any public repository, so authenticating costs no
+      # extra secret and removes the rate limit. Applied globally because
+      # go-getter clones into .terraform/modules, outside this repo, where local
+      # git config does not reach.
+      - name: Authenticate module downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global \
+            url."https://oauth2:${GH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+          echo "Configured authenticated git for github.com."
+
       - name: Check the vending identity is configured
         env:
           VENDING_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
@@ -328,3 +348,12 @@ jobs:
             echo "the PIM for Groups list for up to 24 hours. Re-applying with the same group"
             echo "names shortly after may hit friction."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The token is short-lived and these runners are ephemeral, but leaving a
+      # credential in global git config on a shared pool is not a habit worth
+      # forming.
+      - name: Remove git credentials
+        if: always()
+        run: |
+          git config --global --unset-all \
+            url."https://oauth2:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf || true
