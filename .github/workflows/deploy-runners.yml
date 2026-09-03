@@ -32,10 +32,24 @@ on:
   # applies Terraform against a live subscription, so a push to main must not
   # trigger it on its own.
   workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
 
 permissions:
   id-token: write
   contents: read
+
+concurrency:
+  group: deploy-runners-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # Adjust this path to where your Terraform config lives
@@ -49,7 +63,7 @@ jobs:
   # Stage 1 — Terraform infrastructure
   # ----------------------------------------------------------------------------
   infra:
-    name: Infrastructure
+    name: Infrastructure (${{ inputs.action }})
     runs-on: ubuntu-latest
 
     env:
@@ -169,12 +183,39 @@ jobs:
         run: terraform validate
 
       - name: Terraform plan
+        if: inputs.action != 'destroy'
         run: terraform plan -out=tfplan -input=false
 
+      - name: Terraform plan (destroy)
+        if: inputs.action == 'destroy'
+        run: terraform plan -destroy -out=tfplan -input=false
+
+      - name: Plan summary
+        run: |
+          {
+            echo "### Terraform ${{ inputs.action }} — plan"
+            echo '```'
+            terraform show -no-color tfplan | tail -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Destroying this platform removes the Key Vault holding the GitHub App
+      # credentials, the ACR with the runner image, and the Function App the
+      # webhook points at. Self-hosted runner jobs stop working immediately, and
+      # rebuilding means re-storing the secrets and re-registering the webhook.
+      # The Terraform state account is created by the step above rather than by
+      # Terraform, so it survives.
+      - name: Destroy warning
+        if: inputs.action == 'destroy'
+        run: |
+          echo "::warning::Destroying the runner platform. The Key Vault (with the GitHub App secrets), ACR, and Function App go with it. After rebuilding you must re-store the Key Vault secrets and re-register the webhook. Any workflow using self-hosted runners will fail until then."
+
       - name: Terraform apply
+        if: inputs.action == 'apply' || inputs.action == 'destroy'
         run: terraform apply -auto-approve -input=false tfplan
 
       - name: Import runner image into ACR
+        if: inputs.action == 'apply'
         run: |
           ACR_SERVER=$(terraform output -raw acr_login_server)
           ACR_NAME=$(echo "$ACR_SERVER" | cut -d. -f1)
@@ -184,11 +225,68 @@ jobs:
             --image actions-runner:latest \
             --force
 
+      # --------------------------------------------------------------------------
+      # State container for jobs that run ON the runners (storage-demo).
+      #
+      # Those jobs authenticate as the runner's managed identity, which owns none
+      # of the existing state. Granting it at ACCOUNT scope would let any job on
+      # the pool read runners.tfstate and access-vending.tfstate — the latter
+      # holds UPNs, group object IDs and PIM policy content in plaintext.
+      #
+      # So it gets its own container and a CONTAINER-scoped role assignment. It
+      # can read and write its own state and cannot see the others.
+      # --------------------------------------------------------------------------
+      - name: Provision runner state container
+        if: inputs.action == 'apply'
+        env:
+          STATE_RG: ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA: ${{ vars.STATE_STORAGE_ACCOUNT }}
+          RUNNER_STATE_CONTAINER: ${{ vars.RUNNER_STATE_CONTAINER || 'runner-jobs-tfstate' }}
+        run: |
+          RUNNER_PRINCIPAL_ID=$(terraform output -raw runner_pull_principal_id)
+          STORAGE_ID=$(az storage account show \
+            --name "$STATE_SA" --resource-group "$STATE_RG" --query id -o tsv)
+
+          az storage container create \
+            --name "$RUNNER_STATE_CONTAINER" --account-name "$STATE_SA" \
+            --auth-mode login -o none 2>/dev/null || true
+
+          CONTAINER_SCOPE="$STORAGE_ID/blobServices/default/containers/$RUNNER_STATE_CONTAINER"
+
+          if az role assignment list --assignee "$RUNNER_PRINCIPAL_ID" \
+               --scope "$CONTAINER_SCOPE" \
+               --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | [0].id" \
+               -o tsv 2>/dev/null | grep -q .; then
+            echo "Runner identity already has data access to $RUNNER_STATE_CONTAINER."
+          else
+            echo "Granting the runner identity Storage Blob Data Contributor on $RUNNER_STATE_CONTAINER..."
+            az role assignment create \
+              --assignee-object-id "$RUNNER_PRINCIPAL_ID" \
+              --assignee-principal-type ServicePrincipal \
+              --role "Storage Blob Data Contributor" \
+              --scope "$CONTAINER_SCOPE" -o none
+            echo "Waiting 30s for the role assignment to propagate..."
+            sleep 30
+          fi
+
       - name: Capture outputs
         id: tf-output
+        if: inputs.action == 'apply'
         run: |
           echo "function_app_name=$(terraform output -raw function_app_name)" >> "$GITHUB_OUTPUT"
           echo "resource_group_name=$(terraform output -raw resource_group_name)" >> "$GITHUB_OUTPUT"
+
+      - name: Post-destroy notes
+        if: inputs.action == 'destroy'
+        run: |
+          {
+            echo "### Destroy complete — what is left behind"
+            echo ""
+            echo "- **Terraform state storage** (\`${{ vars.STATE_RESOURCE_GROUP }}/${{ vars.STATE_STORAGE_ACCOUNT }}\`) is created outside Terraform and still exists."
+            echo "- **Key Vault** is soft-deleted, not purged. Recreating with the same name may need \`az keyvault recover\`, or a purge first."
+            echo "- **The GitHub webhook** still points at a hostname that no longer resolves. Re-register it after the next apply."
+            echo "- **Role assignments** for deleted identities linger as \"Identity not found\"."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ----------------------------------------------------------------------------
   # Stage 2 — Scaler Function App code
@@ -199,6 +297,10 @@ jobs:
   deploy-scaler:
     name: Scaler Function
     needs: infra
+    # Only on apply. There is nothing to deploy to after a destroy, and a plan
+    # changes no infrastructure. The infra job only publishes its outputs on
+    # apply, so this job would have no Function App name to target otherwise.
+    if: inputs.action == 'apply'
     runs-on: ubuntu-latest
 
     steps:

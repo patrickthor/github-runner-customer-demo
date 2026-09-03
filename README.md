@@ -20,11 +20,17 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 
 ## Examples
 
-| Example | Workflow | Runs on | What it does |
-|---|---|---|---|
-| `runner-demo` | `deploy-runners.yml` | `ubuntu-latest` (OIDC) | Deploys the runner platform itself |
-| `storage-demo` | `demo-storage.yml` | self-hosted ACI | Smoke test — proves runners have working Azure creds |
-| `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | Vends access via Entra groups, RBAC bindings and PIM policies |
+| Example | Workflow | Runs on | Auth | What it does |
+|---|---|---|---|---|
+| `runner-demo` | `deploy-runners.yml` | `ubuntu-latest` | OIDC | Deploys the runner platform itself |
+| `storage-demo` | `demo-storage.yml` | self-hosted ACI | runner MI | Proves the runners can create infrastructure |
+| `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | OIDC | Vends access via Entra groups, RBAC bindings and PIM policies |
+
+All three take the same `plan` / `apply` / `destroy` choice on manual dispatch, default `plan`, and all three keep Terraform state on the shared state storage account.
+
+`storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
+
+**Order matters:** run `deploy-runners.yml` with `apply` first. It creates the state account, the state container `storage-demo` uses, and the role assignment granting the runner identity access to it.
 
 > `access-vending-demo` authenticates with its own dedicated OIDC identity (`AZURE_VENDING_CLIENT_ID`), not the shared runner managed identity, and needs Graph plus RBAC permissions granted to it before the first run — see [its README](examples/access-vending-demo/README.md#the-vending-identity).
 
@@ -64,7 +70,8 @@ Create the service principal with OIDC trust — see [Deploying identity permiss
 | `RUNNER_WORKLOAD_ROLES` | `Contributor` | Comma-separated Azure roles for runner identity (optional) |
 | `STATE_RESOURCE_GROUP` | `rg-tfstate` | Resource group for state storage (created automatically if missing) |
 | `STATE_STORAGE_ACCOUNT` | `sttfstate1a2b` | Storage account name for Terraform state (created automatically if missing) |
-| `STATE_CONTAINER` | `tfstate` | Blob container name (optional, defaults to tfstate) |
+| `STATE_CONTAINER` | `tfstate` | Blob container for the platform and access-vending state (optional, defaults to tfstate) |
+| `RUNNER_STATE_CONTAINER` | `runner-jobs-tfstate` | Blob container for state written *by jobs on the runners* (optional). Kept separate so the shared runner identity cannot read the other state files |
 
 ### 4. Run the deploy workflow
 

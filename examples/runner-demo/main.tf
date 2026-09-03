@@ -54,3 +54,14 @@ output "key_vault_uri" {
   description = "Store GitHub App secrets here"
   value       = module.runners.key_vault_uri
 }
+
+output "runner_pull_principal_id" {
+  description = <<-EOT
+    Principal ID of the runner identity that ACI containers run as.
+
+    The deploy workflow uses this to grant the runners data-plane access to their
+    own Terraform state container, so jobs on the runners can use a remote
+    backend without being able to read the platform's or access vending's state.
+  EOT
+  value       = module.runners.runner_pull_identity.principal_id
+}

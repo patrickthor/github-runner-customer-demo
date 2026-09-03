@@ -1,20 +1,53 @@
+# ==============================================================================
+# Demo Storage Terraform — proves the runners can create infrastructure
+#
+# Creates a resource group and storage account from an ACI runner. A green run
+# exercises the whole chain: the webhook fired, the scaler created a runner, and
+# the runner's own identity has enough Azure access to provision resources.
+#
+# Authenticates as the runner's managed identity (ARM_USE_MSI), unlike the other
+# two workflows which use OIDC federation. That is deliberate and load-bearing:
+# the point of this test is what THE RUNNER can do, so it must run as the runner
+# identity. Using a federated identity instead would pass even if the runner
+# identity were unassigned or stripped of roles, and nothing would then exercise
+# the runner_workload_roles the platform grants.
+#
+# State is remote, in its own container on the shared state account, matching
+# runner-demo and access-vending-demo. deploy-runners.yml creates that container
+# and grants the runner identity access to it — no manual setup.
+#
+# Prerequisite: run deploy-runners.yml with 'apply' first. It provisions the
+# state account, the container, and the role assignment this workflow needs.
+#
+# Manual dispatch only, with the same plan / apply / destroy choice as the other
+# workflows.
+# ==============================================================================
+
 name: Demo Storage Terraform
 
 on:
   workflow_dispatch:
     inputs:
-      apply:
-        description: "Run terraform apply"
-        required: false
-        default: false
-        type: boolean
+      action:
+        description: "What to run"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
 
 permissions:
   contents: read
 
+concurrency:
+  group: demo-storage-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   terraform:
-    name: Terraform Demo
+    name: Terraform ${{ inputs.action }}
     runs-on:
       - self-hosted
       - azure
@@ -27,8 +60,9 @@ jobs:
     env:
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_MSI: true
-      # ARM_CLIENT_ID is injected by the scaler function into the ACI container environment
-      # It holds the client ID of the runner_pull user-assigned managed identity
+      # ARM_CLIENT_ID is injected by the scaler function into the ACI container
+      # environment. It holds the client ID of the runner_pull user-assigned
+      # managed identity.
 
     steps:
       - name: Checkout
@@ -40,36 +74,89 @@ jobs:
           terraform_version: "~> 1.9"
           terraform_wrapper: false
 
+      - name: Generate backend.hcl
+        env:
+          STATE_RG: ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA: ${{ vars.STATE_STORAGE_ACCOUNT }}
+          RUNNER_STATE_CONTAINER: ${{ vars.RUNNER_STATE_CONTAINER || 'runner-jobs-tfstate' }}
+        run: |
+          if [ -z "$STATE_RG" ] || [ -z "$STATE_SA" ]; then
+            echo "::error::STATE_RESOURCE_GROUP and STATE_STORAGE_ACCOUNT variables must be set. deploy-runners.yml creates the state account and this container on apply."
+            exit 1
+          fi
+
+          # use_msi: authenticate as the runner's managed identity, matching the
+          # providers. deploy-runners.yml grants that identity Storage Blob Data
+          # Contributor on this container only — not on the whole account, so it
+          # cannot read the platform or access-vending state.
+          cat > backend.hcl <<EOF
+          resource_group_name  = "$STATE_RG"
+          storage_account_name = "$STATE_SA"
+          container_name       = "$RUNNER_STATE_CONTAINER"
+          key                  = "storage-demo.tfstate"
+          use_azuread_auth     = true
+          use_msi              = true
+          EOF
+
+          echo "Backend: $STATE_SA/$RUNNER_STATE_CONTAINER/storage-demo.tfstate"
+
       - name: Terraform Init
         run: |
           for attempt in 1 2 3; do
-            terraform init -upgrade && exit 0
+            terraform init -input=false -backend-config=backend.hcl -upgrade && exit 0
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done
-          echo "All attempts failed"
+          echo "::error::init failed. A 403 AuthorizationPermissionMismatch means the runner identity lacks Storage Blob Data Contributor on the state container — run deploy-runners.yml with 'apply' to provision it."
           exit 1
 
       - name: Terraform Validate
         run: terraform validate
 
       - name: Terraform Plan
+        if: inputs.action != 'destroy'
         run: |
           for attempt in 1 2 3; do
-            terraform plan -out=tfplan && exit 0
+            terraform plan -out=tfplan -input=false && exit 0
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done
           echo "All attempts failed"
           exit 1
 
+      - name: Terraform Plan (destroy)
+        if: inputs.action == 'destroy'
+        run: terraform plan -destroy -out=tfplan -input=false
+
+      - name: Plan summary
+        run: |
+          {
+            echo "### Terraform ${{ inputs.action }} — plan"
+            echo '```'
+            terraform show -no-color tfplan | tail -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Terraform Apply
-        if: github.event_name == 'workflow_dispatch' && inputs.apply == true
+        if: inputs.action == 'apply' || inputs.action == 'destroy'
         run: |
           for attempt in 1 2 3; do
-            terraform plan -out=tfplan && terraform apply -auto-approve tfplan && exit 0
+            terraform apply -auto-approve -input=false tfplan && exit 0
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done
           echo "All attempts failed"
           exit 1
+
+      - name: Result
+        if: inputs.action == 'apply'
+        run: |
+          {
+            echo "### Created"
+            echo '```'
+            terraform output -no-color 2>/dev/null || echo "(no outputs)"
+            echo '```'
+            echo "The runner identity created these, which is what this test verifies."
+            echo "State is tracked remotely, so re-running \`plan\` should report no changes,"
+            echo "and \`destroy\` will remove them."
+          } >> "$GITHUB_STEP_SUMMARY"

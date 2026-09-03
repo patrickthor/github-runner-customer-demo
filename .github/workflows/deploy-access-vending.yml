@@ -10,8 +10,10 @@
 # REQUIRED GITHUB CONFIGURATION  (Settings -> Secrets and variables -> Actions)
 #
 #   Secrets:
-#     AZURE_VENDING_CLIENT_ID  Client ID of the DEDICATED vending identity (OIDC).
-#                              Distinct from AZURE_CLIENT_ID on purpose.
+#     AZURE_CLIENT_ID          Client ID of the OIDC identity. Reused from the
+#                              runner-platform deploy by default.
+#     AZURE_VENDING_CLIENT_ID  Optional. Set this to run access vending under a
+#                              separate identity; it takes precedence.
 #     AZURE_TENANT_ID          Entra tenant ID
 #     AZURE_SUBSCRIPTION_ID    Subscription the azurerm provider authenticates to
 #
@@ -28,22 +30,32 @@
 # ------------------------------------------------------------------------------
 # !! PERMISSIONS THE RUNNER IDENTITY NEEDS — READ BEFORE FIRST RUN !!
 #
-# This workflow authenticates with a DEDICATED OIDC federated identity, not the
-# ACI runner's shared managed identity.
+# This job runs on the self-hosted ACI runners, the same as demo-storage.yml, but
+# authenticates differently: OIDC federation rather than the runner's managed
+# identity. Where a job runs and which identity it uses are independent choices.
 #
-# Why not the runner's managed identity: that identity is attached to the
-# container, so it is shared by every job that lands on the pool. Granting it
-# Group.ReadWrite.All would let any workflow on those runners manage any group in
-# the tenant. The OIDC token here is minted per run and scoped by the federated
-# credential's subject to this repository, so the permissions below belong to
-# this workload alone.
+# By default it reuses AZURE_CLIENT_ID, the identity that deploys the runner
+# platform. That is deliberate: it already holds User Access Administrator on the
+# subscription, Storage Blob Data Contributor on the state account, and a
+# federated credential with the right subject — so there is no second identity to
+# create or manage.
 #
-# The identity is separate from AZURE_CLIENT_ID (the runner-platform deployer).
-# Keep it separate: RoleManagement.ReadWrite.Directory in particular lets the
-# holder assign directory roles anywhere in the tenant, including to itself.
+# Why not the runner's managed identity, given demo-storage.yml uses it: that
+# identity is attached to the container and shared by every job on the pool.
+# Granting it Group.ReadWrite.All would let anything running there manage any
+# group in the tenant. It would also need Storage Blob Data Contributor added for
+# the remote backend. OIDC costs nothing extra here and avoids both.
+#
+# To split access vending onto its own identity later, set AZURE_VENDING_CLIENT_ID
+# and grant it the permissions below. The workflow prefers it automatically; no
+# other change is needed.
 #
 # ------------------------------------------------------------------------------
-# PERMISSIONS THE VENDING IDENTITY NEEDS
+# PERMISSIONS THE AUTHENTICATING IDENTITY NEEDS
+#
+# Azure roles are already in place if you are reusing AZURE_CLIENT_ID. The Graph
+# permissions are NOT — they require a one-time admin consent, and no identity
+# choice avoids that step.
 #
 # Microsoft Graph (application permissions, admin consent required):
 #     Group.ReadWrite.All
@@ -58,22 +70,19 @@
 #
 # Azure RBAC, on the Terraform state storage account:
 #     Storage Blob Data Contributor
-#     -- deploy-runners.yml grants this to AZURE_CLIENT_ID only, so the vending
-#        identity needs it granted separately. Missing it fails at `init` with
+#     -- deploy-runners.yml grants this to AZURE_CLIENT_ID when it creates the
+#        account, so reusing that identity needs nothing here. A separate identity
+#        needs it granted explicitly, or `init` fails with
 #        403 AuthorizationPermissionMismatch on ListBlobs.
 #
-# The bootstrap commands are in examples/access-vending-demo/README.md.
+# Setup commands are in examples/access-vending-demo/README.md.
 #
 # The entra_role mechanism needs two further Graph permissions
 # (RoleManagement.ReadWrite.Directory and
-# RoleEligibilitySchedule.ReadWrite.Directory). It is left commented out in
-# terraform.tfvars for that reason.
-#
-# The entra_role mechanism needs two further Graph permissions
-# (RoleManagement.ReadWrite.Directory and
-# RoleEligibilitySchedule.ReadWrite.Directory). The first lets the identity
-# assign directory roles anywhere in the tenant, including to itself. It is left
-# commented out in terraform.tfvars for that reason.
+# RoleEligibilitySchedule.ReadWrite.Directory). The first lets the identity assign
+# directory roles anywhere in the tenant, including to itself — which is why it is
+# left commented out in terraform.tfvars, and why it should stay that way while
+# this shares an identity with the platform deploy.
 #
 # ------------------------------------------------------------------------------
 # ORDER OF OPERATIONS
@@ -126,13 +135,19 @@ jobs:
         working-directory: examples/access-vending-demo
 
     env:
-      # Dedicated federated identity. ARM_USE_OIDC makes the azurerm and azuread
-      # providers exchange the per-run GitHub token for an Azure access token, so
+      # Federated identity. ARM_USE_OIDC makes the azurerm and azuread providers
+      # exchange the per-run GitHub token for an Azure access token, so
       # ARM_CLIENT_ID must be set explicitly here — it deliberately overrides the
       # runner managed identity's client ID that the scaler injects into the
       # container environment.
+      #
+      # This reuses AZURE_CLIENT_ID, the runner-platform deployer. Deliberate: it
+      # already has the state-storage data role and a federated credential with
+      # the right subject, so there is no second identity to manage. Set
+      # AZURE_VENDING_CLIENT_ID to split them later — the workflow prefers it when
+      # present and needs no other change.
       ARM_USE_OIDC: true
-      ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
+      ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
@@ -161,15 +176,18 @@ jobs:
       - name: Check the vending identity is configured
         env:
           VENDING_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
+          PLATFORM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
-          if [ -z "$VENDING_CLIENT_ID" ]; then
-            echo "::error::AZURE_VENDING_CLIENT_ID secret is not set. This workflow uses a dedicated OIDC identity, separate from AZURE_CLIENT_ID. Create it with the bootstrap commands in examples/access-vending-demo/README.md, then add the client ID as a repository secret."
+          if [ -n "$VENDING_CLIENT_ID" ]; then
+            echo "Using the dedicated vending identity (AZURE_VENDING_CLIENT_ID)."
+          elif [ -n "$PLATFORM_CLIENT_ID" ]; then
+            echo "Using AZURE_CLIENT_ID — the runner-platform deployer — for access vending."
+            echo "It needs the four Graph application permissions in addition to its Azure roles."
+            echo "::notice::Sharing the platform deploy identity with access vending. Its blast radius extends from one subscription to tenant-wide group management. Set AZURE_VENDING_CLIENT_ID to split them."
+          else
+            echo "::error::Neither AZURE_VENDING_CLIENT_ID nor AZURE_CLIENT_ID is set. One of them must hold the client ID of an identity with a federated credential for this repository."
             exit 1
           fi
-          if [ "$VENDING_CLIENT_ID" = "${{ secrets.AZURE_CLIENT_ID }}" ]; then
-            echo "::warning::AZURE_VENDING_CLIENT_ID matches AZURE_CLIENT_ID. The runner-platform deployer is being reused for access vending, so Graph write permissions are shared across both workloads. Use a separate identity."
-          fi
-          echo "Vending identity configured (OIDC, per-run token)."
 
       - name: Check terraform.tfvars is present
         run: |

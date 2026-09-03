@@ -58,66 +58,39 @@ On `apply` the job summary prints the contract for the access-package repo — g
 
 ### The vending identity
 
-This workflow uses a **dedicated OIDC federated identity**, separate from the `AZURE_CLIENT_ID` that deploys the runner platform. Set its client ID as the repository secret `AZURE_VENDING_CLIENT_ID`.
+This workflow runs on the self-hosted ACI runners like `demo-storage.yml`, but authenticates with **OIDC federation** rather than the runner's managed identity. Where a job runs and which identity it uses are independent choices.
 
-**Why not the runner's managed identity.** The runner identity is attached to the ACI *container*, so it is shared by every job that lands on the pool. Granting it `Group.ReadWrite.All` would let any workflow on those runners manage any group in the tenant, and permissions would only accumulate as workloads are added. A federated credential is scoped to *this repository* by its `subject`, and the token is minted per run and expires with it — so these permissions belong to this workload alone. Note this is about identity scoping, not the runner type: OIDC works identically on the self-hosted pool and on `ubuntu-latest`, since `id-token: write` is available on both.
+By default it reuses **`AZURE_CLIENT_ID`** — the identity that deploys the runner platform. No second identity to create.
 
-#### Create it (one-time)
+**Why reuse it.** It already has everything except Graph: `User Access Administrator` and `Contributor` on the subscription, `Storage Blob Data Contributor` on the state account (granted by `deploy-runners.yml` when it created the account), and a federated credential whose subject already matches this repository. So there is nothing to set up on the Azure side.
 
-```bash
-APP_NAME=sp-access-vending
-GITHUB_ORG=<your-org>
-GITHUB_REPO=github-runner-customer-demo   # repo name only, not org/repo
+**Why not the runner's managed identity,** given `demo-storage.yml` uses it: that identity is attached to the container and shared by every job on the pool, so granting it `Group.ReadWrite.All` would let anything running there manage any group in the tenant. It would also need `Storage Blob Data Contributor` added for the remote backend. OIDC avoids both at no extra cost.
 
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+### The one setup step
 
-CLIENT_ID=$(az ad app create --display-name $APP_NAME --query appId -o tsv)
-az ad sp create --id $CLIENT_ID
-PRINCIPAL_ID=$(az ad sp show --id $CLIENT_ID --query id -o tsv)
+Grant the four Microsoft Graph application permissions to `AZURE_CLIENT_ID`:
 
-# Federated credential — subject must match the repo and ref exactly
-az ad app federated-credential create --id $CLIENT_ID --parameters "{
-  \"name\": \"github-actions-main\",
-  \"issuer\": \"https://token.actions.githubusercontent.com\",
-  \"subject\": \"repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main\",
-  \"audiences\": [\"api://AzureADTokenExchange\"]
-}"
-
-echo "AZURE_VENDING_CLIENT_ID: $CLIENT_ID"
-```
-
-#### Grant it permissions
-
-**Microsoft Graph** (application permissions, admin consent required):
-- `Group.ReadWrite.All`
-- `User.Read.All`
-- `RoleManagementPolicy.ReadWrite.AzureADGroup`
+- `Group.ReadWrite.All` — create and update the groups
+- `User.Read.All` — look up systemeier by UPN (`Group.ReadWrite.All` does *not* cover this; without it every `data "azuread_user"` fails with 403)
+- `RoleManagementPolicy.ReadWrite.AzureADGroup` — the PIM activation policy, which is also what onboards a group to PIM for Groups
 - `PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup`
 
-The module's own repo ships `bootstrap/grant-graph-permissions.sh`, which grants exactly this set — point it at `$CLIENT_ID`.
+The module's repo ships `bootstrap/grant-graph-permissions.sh` for exactly this set — pass it the client ID. It is idempotent and skips anything already granted.
 
-**Azure RBAC:**
+This needs **admin consent** from a Privileged Role Administrator or Global Administrator. That is an intentional Entra boundary: no identity choice avoids it, and it cannot be automated, because a pipeline that could grant itself tenant-wide group write would be a privilege-escalation path rather than a convenience.
 
-```bash
-# State storage — without this, init fails with 403 AuthorizationPermissionMismatch.
-# deploy-runners.yml grants this to AZURE_CLIENT_ID only, never to this identity.
-az role assignment create \
-  --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" \
-  --scope $(az storage account show --name <STATE_STORAGE_ACCOUNT> \
-              --resource-group <STATE_RESOURCE_GROUP> --query id -o tsv)
+> **Keep `entra_role` commented out in `terraform.tfvars`.** It needs `RoleManagement.ReadWrite.Directory`, which lets the holder assign directory roles anywhere in the tenant including to itself. On an identity that also holds `User Access Administrator`, that combination is the one genuine problem with sharing — so while these workloads share an identity, leave it disabled.
 
-# Only needed for azure_pim roles. "Role Based Access Control Administrator" is
-# NOT enough — it covers the role bindings but not the PIM policies.
-az role assignment create \
-  --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" \
-  --scope /subscriptions/$SUBSCRIPTION_ID
-```
+### Splitting it out later
 
-> **Consider scoping the credential to a GitHub environment** rather than a branch. Change the `subject` to `repo:$GITHUB_ORG/$GITHUB_REPO:environment:access-vending`, create that environment with required reviewers, and add `environment: access-vending` to the job. The identity then can't be issued to a run nobody approved — an approval gate on the credential itself, which is proportionate for a pipeline that decides who can become Owner on a subscription.
+If access vending outgrows the demo, give it its own identity: set the `AZURE_VENDING_CLIENT_ID` secret and the workflow prefers it automatically, with no other change. The new principal then needs the Graph set above plus `Storage Blob Data Contributor` on the state account and `User Access Administrator` on the subscription.
 
-> **Keep `entra_role` disabled unless you need it.** It requires `RoleManagement.ReadWrite.Directory`, which lets this identity assign directory roles anywhere in the tenant — including to itself.
+A user-assigned managed identity is the better shape for that, since `azurerm_user_assigned_identity` and `azurerm_federated_identity_credential` are plain ARM resources that Terraform can create with the Contributor you already have — no Graph permission needed to create the identity itself. Two things to know before going that way:
+
+- **`terraform destroy` deletes the identity, its service principal, and the Graph consent with it.** A rebuild means re-consenting and updating the secret, so give it a state file with a lifecycle separate from the demo.
+- **A wrong `subject` fails silently.** The credential is created without error and only fails at token exchange, with `AADSTS700213`. Matching is case-sensitive.
+
+Consider scoping its federated credential to a GitHub *environment* (`repo:<org>/<repo>:environment:access-vending`) with required reviewers, rather than a branch. The identity then cannot be issued to a run nobody approved.
 
 ## State
 
