@@ -30,15 +30,16 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 
 All three take the same `plan` / `apply` / `destroy` choice on manual dispatch, default `plan`, and all three keep Terraform state on the shared state storage account.
 
-`access-vending-demo` calls **two** modules against **one** state, and its workflow takes a second choice — `components` — for how much of the chain to deploy:
+`access-vending-demo` calls **two** modules against **one** state, so its workflow takes a second choice — `components` — for what to deploy:
 
-| `components` | Deploys | Use it for |
+| `components` | Deploys | Needs |
 |---|---|---|
-| `as-configured` (default) | whatever `terraform.tfvars` says | normal runs; the committed file is the governance record |
-| `groups-and-pim` | groups + RBAC + PIM policies only | standing up a new tenant, before entitlement management is licensed or consented |
-| `groups-pim-and-access-packages` | the full chain | once catalogs and packages are ready |
+| `groups-and-pim` (default) | Entra groups, RBAC bindings, PIM policies — **gate 2** | Graph group + PIM permissions |
+| `groups-pim-and-access-packages` | the above, plus catalogs and access packages — **gate 1** | also `EntitlementManagement.ReadWrite.All`, and Entra ID Governance or Entra Suite licensing |
 
-Selecting `groups-and-pim` when packages already exist **deletes** the catalogs and packages, so an `apply` in that direction needs `confirm_remove_access_packages`. Groups, RBAC and PIM policies are never touched by the switch.
+With `groups-and-pim` nothing is requestable, so no user can obtain access without being added to a group by hand. That is the mode to run first on a new tenant.
+
+Selecting `groups-and-pim` after packages exist **deletes** the catalogs and packages, so an `apply` in that direction needs `confirm_remove_access_packages`. Groups, RBAC and PIM policies are never touched by the switch.
 
 `storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
 

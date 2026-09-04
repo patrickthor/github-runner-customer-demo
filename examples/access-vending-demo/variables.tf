@@ -133,9 +133,9 @@ variable "pim_group_propagation_delay" {
 # ==============================================================================
 # Access packages — the second module
 #
-# Everything below is inert while enable_access_packages is false. It is declared
-# unconditionally so that flipping the switch does not also require adding
-# variables, and so a reviewer can see the whole intended shape in one file.
+# Everything below is unused under `components: groups-and-pim`. Declared
+# unconditionally so that switching to the full chain requires no edit here, and so
+# a reviewer can see the whole intended shape in one file.
 # ==============================================================================
 
 variable "enable_access_packages" {
@@ -143,21 +143,30 @@ variable "enable_access_packages" {
     Whether to create catalogs and access packages on top of the groups and PIM
     policies.
 
-      false  groups + PIM only. Gate 2 exists; nothing is requestable yet. The
-             right first step on a new tenant: verify group naming and test
-             activation with a hand-added member before any package exists.
+      false  groups + PIM only. Gate 2 exists; nothing is requestable yet, so no
+             user can obtain access without being added to a group by hand.
 
       true   the full chain. Catalogs, access packages and assignment policies.
 
-    Committed default is false. Flip it after
-    scripts/verify-entitlement-management.sh confirms this tenant can actually do
-    entitlement management — eligible group membership in access packages needs
-    Entra ID Governance or Entra Suite, NOT P2 alone, and a P2-only tenant will
-    fail at apply rather than at plan.
+    SET BY THE WORKFLOW, NOT BY terraform.tfvars. The Deploy Identity Governance
+    workflow's `components` choice exports TF_VAR_enable_access_packages, and a
+    TF_VAR always beats a tfvars entry — so keeping a copy in terraform.tfvars
+    would be a value that can never take effect. The switch has exactly one home.
 
-    The deploy workflow can narrow a run to groups+PIM without editing this file,
-    but narrowing after packages exist is a DESTROY of the catalogs and packages.
-    The workflow refuses that without an explicit confirmation input.
+      groups-and-pim                   -> false
+      groups-pim-and-access-packages   -> true
+
+    Default false so a local `terraform plan` without the variable does the
+    smaller, safer thing.
+
+    Before deploying packages: eligible group membership in access packages needs
+    Entra ID Governance or Entra Suite, NOT P2 alone, and a P2-only tenant fails
+    partway through the apply rather than at plan. Run
+    scripts/verify-entitlement-management.sh from the access-packages repo first.
+
+    Switching back down after packages exist DESTROYS the catalogs and access
+    packages. The workflow refuses that apply without an explicit confirmation
+    input.
   EOT
   type        = bool
   default     = false

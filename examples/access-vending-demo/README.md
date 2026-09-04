@@ -50,11 +50,13 @@ request package → [GATE 1] → assigned / eligible → activate in PIM → [GA
 | Scope | Catalog | Mechanism | Groups | What the user activates |
 |---|---|---|---|---|
 | `platform-demo` (Azure subscription) | `cloud-access` | `azure_pim` | `azure-platform-demo-reader`, `-contributor`, `-owner`, `-approvers` | the **role** |
-| `sandbox` (AWS account) | `sandboxes` | `pim_for_groups` | `aws-sandbox-readonly`, `aws-sandbox-admin` | the **membership** |
+| `sandbox` (AWS account) | `sandboxes` | `pim_for_groups` | `aws-sandbox-readonly`, `aws-sandbox-admin`, `-approvers` | the **membership** |
+
+`sandbox-admin` uses `approval_type = "dual"`, and that is load-bearing rather than cosmetic. Both sandbox roles are `pim_for_groups`, so both are `EligibleMember` and neither can be attached to the package from Terraform. `dual` is what makes the vending module create `aws-sandbox-approvers`, which is then the only thing the sandbox package grants — without it the package would grant nothing and the packages module fails the plan rather than publishing something that looks like working access. See [gap 1](#three-gaps-that-are-intentional-not-forgotten).
 
 The third, `entra_role`, is commented out. Enabling it is a tenant-wide privilege decision, not a demo step — see the notes in `terraform.tfvars`.
 
-With `enable_access_packages = true` that becomes two catalogs and two access packages, one per scope.
+Under `components: groups-pim-and-access-packages` that gains two catalogs (`cloud-access`, `sandboxes`) and two access packages, one per scope.
 
 ## Catalogs
 
@@ -101,25 +103,32 @@ It holds no credentials. `tenant_id` and `provider_subscription_id` come from Gi
 
 **Actions → Deploy Identity Governance → Run workflow.** Manual dispatch only: this config decides who can become Owner on a subscription, so an accidental push to `main` must not change it.
 
-Two choices:
+Two choices.
 
-| Input | Options |
-|---|---|
-| `action` | `plan` / `apply` / `destroy` |
-| `components` | `as-configured` / `groups-and-pim` / `groups-pim-and-access-packages` |
+**`action`** — `plan`, `apply` or `destroy`.
 
-`as-configured` follows `terraform.tfvars`, which is the honest default — a run that silently differs from the committed record is not reproducible. The explicit modes exist for staged rollout and for narrowing a run without a commit.
+**`components`** — what to deploy:
 
-**Narrowing is destructive.** Selecting `groups-and-pim` when packages already exist deletes the catalogs and packages: users lose their assignments and any resource role finished by hand in the portal goes with it. The workflow refuses that `apply` unless `confirm_remove_access_packages` is set. Groups, RBAC bindings and PIM policies are never affected by the switch.
+| | Creates | Gate | Extra requirements |
+|---|---|---|---|
+| `groups-and-pim` (default) | Entra groups, Azure RBAC bindings, PIM activation policies | gate 2 | none beyond the group + PIM Graph permissions |
+| `groups-pim-and-access-packages` | the above, plus catalogs, access packages and assignment policies | gates 1 and 2 | `EntitlementManagement.ReadWrite.All`, and Entra ID Governance or Entra Suite licensing |
+
+With `groups-and-pim` nothing is requestable: no user can obtain access without being added to a group by hand. It needs no entitlement-management licensing, which is why it is the default and the mode to run first.
+
+The choice sets `TF_VAR_enable_access_packages`, which gates `module "access_packages"`. It is **not** in `terraform.tfvars` — a `TF_VAR` always beats a tfvars entry, so a copy there could never take effect. The switch has exactly one home.
+
+**Switching back down is destructive.** Selecting `groups-and-pim` after packages exist deletes the catalogs and packages: users lose their assignments, and any resource role finished by hand in the portal goes with it. The workflow reads that out of the plan and refuses the `apply` unless `confirm_remove_access_packages` is set. Groups, RBAC bindings and PIM policies are never affected by the switch.
 
 ### Recommended first run on a new tenant
 
-1. `components: groups-and-pim`, `action: apply`. Verify group names, then test activation with a hand-added member.
-2. Run `scripts/verify-entitlement-management.sh` from the access-packages repo. **Eligible group membership in access packages requires Entra ID Governance or Entra Suite — P2 alone is not enough**, and a P2-only tenant fails partway through the apply rather than at plan.
-3. Grant `EntitlementManagement.ReadWrite.All` to the deploy identity and get admin consent.
-4. Set `enable_access_packages = true` in `terraform.tfvars`, open a PR, then `action: apply` with `components: as-configured`.
+1. `action: plan`, `components: groups-and-pim`. Exercises `init`, the module pins, the contract assembly and both providers without writing anything.
+2. `action: apply`, same components. Verify the group names, then test activation with a hand-added member.
+3. Run `scripts/verify-entitlement-management.sh` from the access-packages repo. **Eligible group membership in access packages requires Entra ID Governance or Entra Suite — P2 alone is not enough**, and a P2-only tenant fails partway through the apply rather than at plan.
+4. Grant `EntitlementManagement.ReadWrite.All` to the deploy identity and get admin consent.
+5. `action: plan`, `components: groups-pim-and-access-packages`. Then `apply`.
 
-`terraform output contract` shows exactly what the packages would be built from, before you enable them.
+Between steps 2 and 5, `terraform output contract` shows exactly what the packages will be built from.
 
 ### The deploy identity
 
@@ -205,6 +214,15 @@ The approver groups are seeded with the systemeier so a `dual` role is activatab
 
 ## Module pinning
 
-`main.tf` pins **both** modules to `v1.0.0`, the same tag on each. They share a versioned contract (`contract_version = 1`), so a mismatched pair fails with a type error rather than doing something subtly wrong — keeping the versions in lockstep makes the pairing obvious to a reviewer.
+`main.tf` pins both modules to a **commit SHA**, because neither module repo has tags yet:
 
-Both module repos must be tagged before either mode works. `count = 0` does not help: Terraform fetches every declared module regardless of `count`, and the reference to `module.access_vending.contract` has to resolve. An `init` failure mentioning a missing ref is a missing tag, not a network problem.
+| Module | Ref | Commit |
+|---|---|---|
+| `access-vending` | `008f72c8fd92f8f168cc8ba8d21337931cf72066` | `initial-setup` @ 2026-09-04, "reowkr the whole thing" |
+| `access-packages` | `5a046e5ca0c8353039656ef62387ef7305fc46f5` | `inital-commit` @ 2026-09-04, "Major rework" |
+
+Immutability is the property that matters, but a SHA tells you nothing about what changed — so **switch both pins to `v1.0.0` once the tags are cut**, and keep them in lockstep. The modules share a versioned contract (`contract_version = 1`), so a mismatched pair fails with a type error rather than doing something subtly wrong.
+
+A branch ref would be wrong here even though both branches exist: these groups are the resource identity the access packages attach to, so an unintended module change can orphan every package association — and the failure surfaces on the package side, not the group side.
+
+`count = 0` does not exempt the second module from this. Terraform fetches every declared module regardless of `count`, and the reference to `module.access_vending.contract` has to resolve. So an `init` failure naming a missing ref is a bad pin, not a network problem, in either mode.

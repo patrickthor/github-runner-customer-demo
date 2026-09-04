@@ -26,17 +26,19 @@
 cloud_prefix = "azure"
 
 # ------------------------------------------------------------------------------
-# What gets deployed
+# NOT HERE: enable_access_packages
 #
-# false = groups + PIM only. Gate 2 exists (who may activate what), but nothing is
-# requestable yet. This is the right first state on a new tenant: verify the group
-# names, test activation with a hand-added member, then turn packages on.
+# Whether catalogs and access packages get deployed is the `components` choice on
+# the Deploy Identity Governance workflow:
 #
-# Before flipping this to true, run scripts/verify-entitlement-management.sh.
-# Eligible group membership in access packages requires Entra ID Governance or
-# Entra Suite — NOT P2 alone — and a P2-only tenant fails at apply, not at plan.
+#   groups-and-pim                   groups + RBAC + PIM policies
+#   groups-pim-and-access-packages   the above, plus catalogs and access packages
+#
+# The workflow sets TF_VAR_enable_access_packages from that choice, and a TF_VAR
+# always beats this file — so a copy here could never take effect. One source, so
+# there is nothing to reconcile. Running locally without the variable gives
+# groups + PIM only, which is the variable's default in variables.tf.
 # ------------------------------------------------------------------------------
-enable_access_packages = false
 
 # Catalog label for scopes that do not set `catalog` themselves. A catalog is a
 # DELEGATION boundary in Entra: whoever holds a catalog role can add resources and
@@ -124,6 +126,7 @@ access_scopes = {
   # `cloud`, so "aws-sandbox" would produce aws-aws-sandbox-admin.
   #
   # Produces groups: aws-sandbox-readonly / aws-sandbox-admin
+  # plus aws-sandbox-approvers, because "admin" uses approval_type = "dual".
   # ============================================================================
 
   "sandbox" = {
@@ -147,12 +150,29 @@ access_scopes = {
         active_assignment_expire_after = "P30D"
       }
 
-      # Approved by the systemeier, MFA, 4-hour cap. Eligibility has no forced
-      # expiry here — the access package owns that lifecycle.
+      # MFA, 4-hour cap. Eligibility has no forced expiry here — the access
+      # package owns that lifecycle.
+      #
+      # "dual" rather than "owner", and NOT only because AdministratorAccess on an
+      # AWS account deserves two signatures. It is load-bearing for the access
+      # package:
+      #
+      #   * "dual" is what makes the access-vending module create
+      #     aws-sandbox-approvers for this scope.
+      #   * Both roles in this scope are pim_for_groups, so both are
+      #     "EligibleMember", which the azuread provider cannot express — they are
+      #     excluded from the package and finished in the portal.
+      #   * Without an approver group, the sandbox package would therefore grant
+      #     NOTHING. The access-packages module fails the plan on that rather than
+      #     publishing a package that looks like working access and is not.
+      #
+      # With "dual", the package grants peer-approval rights in the scope, which is
+      # also what stops this scope's single systemeier from deadlocking: PIM blocks
+      # self-approval, so one owner cannot approve their own activation.
       "admin" = {
         jit_mechanism                           = "pim_for_groups"
         target_role                             = "AdministratorAccess"
-        approval_type                           = "owner"
+        approval_type                           = "dual"
         max_activation_hours                    = 4
         require_mfa                             = true
         active_assignment_expire_after          = "P15D"
@@ -211,9 +231,9 @@ access_scopes = {
 # ==============================================================================
 # ACCESS PACKAGES — gate 1
 #
-# Inert while enable_access_packages = false. Committed anyway, so turning the
-# switch on is a one-line diff and the intended shape is reviewable before it is
-# live.
+# Ignored entirely under `components: groups-and-pim`, and committed anyway. The
+# shape is then reviewable before the packages are ever live, and switching the
+# workflow to groups-pim-and-access-packages needs no commit at all.
 #
 # Nothing below names a group, a role or a scope's contents. All of that comes from
 # access_scopes above, through the access-vending module's contract. Adding a role

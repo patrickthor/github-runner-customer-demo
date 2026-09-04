@@ -18,25 +18,30 @@
 # THE TWO COMPONENT MODES
 #
 #   groups-and-pim                   Module 1 only. Gate 2 exists; nothing is
-#                                    requestable yet. The right first state on a
-#                                    new tenant: verify group naming and test
-#                                    activation with a hand-added member before any
-#                                    package exists.
+#                                    requestable yet. The right first state on a new
+#                                    tenant: verify group naming and test activation
+#                                    with a hand-added member before any package
+#                                    exists. Needs no entitlement-management
+#                                    licensing and no EntitlementManagement Graph
+#                                    permission.
 #
-#   groups-pim-and-access-packages   Both modules. Catalogs and packages on top.
+#   groups-pim-and-access-packages   Both modules. Catalogs and access packages on
+#                                    top of the above.
 #
-#   as-configured (default)          Whatever terraform.tfvars says. This is the
-#                                    honest default, because terraform.tfvars is
-#                                    the committed governance record and a run that
-#                                    silently differs from it is not reproducible.
+# The choice lives HERE and nowhere else. It sets TF_VAR_enable_access_packages, and
+# a TF_VAR always beats terraform.tfvars — so keeping a copy of the switch in the
+# committed tfvars would be a value that can never take effect. One source, so
+# there is nothing to reconcile.
 #
-# The two explicit modes exist for staged rollout and for narrowing a run without a
-# commit. NARROWING IS DESTRUCTIVE: selecting groups-and-pim when packages already
-# exist deletes the catalogs and packages. That is guarded — see
-# confirm_remove_access_packages below — because the plan for it looks routine.
+# Default is groups-and-pim: the smaller blast radius, and the mode you run first.
 #
-# Note that catalogs and access packages are the ONLY things narrowing removes. It
-# never touches groups, RBAC bindings or PIM policies, and PIM onboarding is
+# SWITCHING BACK DOWN IS DESTRUCTIVE. Selecting groups-and-pim when packages already
+# exist deletes the catalogs and access packages — users lose their assignments, and
+# any resource role finished by hand in the portal goes with the package. The plan
+# for that looks routine, so it is guarded by confirm_remove_access_packages below.
+#
+# Catalogs and access packages are the ONLY things the switch removes. Groups, RBAC
+# bindings and PIM policies are never touched by it, and PIM onboarding is
 # irreversible regardless.
 #
 # ------------------------------------------------------------------------------
@@ -145,12 +150,11 @@ on:
           - destroy
 
       components:
-        description: "Which components (as-configured follows terraform.tfvars)"
+        description: "What to deploy"
         required: true
-        default: as-configured
+        default: groups-and-pim
         type: choice
         options:
-          - as-configured
           - groups-and-pim
           - groups-pim-and-access-packages
 
@@ -240,34 +244,21 @@ jobs:
           echo "Configured authenticated git for github.com."
 
       # ------------------------------------------------------------------------
-      # Resolve the component mode BEFORE anything expensive.
-      #
-      # TF_VAR_ always beats terraform.tfvars, so "as-configured" must NOT set the
-      # variable at all — otherwise the committed record could never win.
+      # Turn the component choice into the one Terraform variable that gates
+      # module "access_packages". Done before anything expensive, so an unknown
+      # value fails in two seconds.
       # ------------------------------------------------------------------------
-      - name: Resolve component mode
+      - name: Resolve components
         id: mode
         env:
           COMPONENTS: ${{ inputs.components }}
         run: |
-          # What the committed governance record asks for. Absent means false,
-          # which matches the variable's default.
-          CONFIGURED=$(grep -E '^[[:space:]]*enable_access_packages[[:space:]]*=' terraform.tfvars \
-                       | head -1 | grep -oE '(true|false)' || echo "false")
-          echo "terraform.tfvars requests: enable_access_packages = $CONFIGURED"
-
           case "$COMPONENTS" in
-            as-configured)
-              EFFECTIVE="$CONFIGURED"
-              echo "Following terraform.tfvars. No TF_VAR override set."
-              ;;
             groups-and-pim)
-              EFFECTIVE="false"
-              echo "TF_VAR_enable_access_packages=false" >> "$GITHUB_ENV"
+              PACKAGES="false"
               ;;
             groups-pim-and-access-packages)
-              EFFECTIVE="true"
-              echo "TF_VAR_enable_access_packages=true" >> "$GITHUB_ENV"
+              PACKAGES="true"
               ;;
             *)
               echo "::error::Unknown components value: $COMPONENTS"
@@ -275,35 +266,27 @@ jobs:
               ;;
           esac
 
-          echo "effective=$EFFECTIVE"   >> "$GITHUB_OUTPUT"
-          echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
-
-          # Narrowing against the committed record. Flagged here, before the plan,
-          # so the reason is visible even if the plan output is long.
-          if [ "$CONFIGURED" = "true" ] && [ "$EFFECTIVE" = "false" ]; then
-            echo "narrowing=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::terraform.tfvars enables access packages but this run selects groups-and-pim. The plan will DELETE the catalogs and access packages. Groups, RBAC and PIM policies are untouched."
-          else
-            echo "narrowing=false" >> "$GITHUB_OUTPUT"
-          fi
+          # This is the ONLY place the switch is set. terraform.tfvars deliberately
+          # does not carry a copy: TF_VAR always wins, so a copy there could never
+          # take effect.
+          echo "TF_VAR_enable_access_packages=$PACKAGES" >> "$GITHUB_ENV"
+          echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+          echo "Components: $COMPONENTS  ->  enable_access_packages = $PACKAGES"
 
           {
-            echo "### Components"
+            echo "### Deploying: \`$COMPONENTS\`"
             echo ""
-            echo "| | |"
-            echo "|---|---|"
-            echo "| Input | \`$COMPONENTS\` |"
-            echo "| terraform.tfvars | \`enable_access_packages = $CONFIGURED\` |"
-            echo "| Effective | \`$EFFECTIVE\` |"
-            echo ""
-            if [ "$EFFECTIVE" = "true" ]; then
-              echo "Deploying **groups + PIM + catalogs + access packages**."
+            if [ "$PACKAGES" = "true" ]; then
+              echo "Entra groups, Azure RBAC bindings and PIM activation policies (**gate 2**),"
+              echo "plus catalogs, access packages and assignment policies (**gate 1**)."
               echo ""
-              echo "Requires \`EntitlementManagement.ReadWrite.All\` on the deploy identity,"
-              echo "and **Entra ID Governance or Entra Suite** licensing — P2 alone is not"
-              echo "enough and fails partway through the apply, not at plan."
+              echo "Needs \`EntitlementManagement.ReadWrite.All\` on the deploy identity, and"
+              echo "**Entra ID Governance or Entra Suite** licensing. P2 alone is not enough and"
+              echo "fails partway through the apply rather than at plan."
             else
-              echo "Deploying **groups + PIM only**. Gate 2 exists; nothing is requestable yet."
+              echo "Entra groups, Azure RBAC bindings and PIM activation policies (**gate 2**)"
+              echo "only. No catalogs and no access packages, so nothing is requestable yet and"
+              echo "no user can obtain access without being added to a group by hand."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -311,7 +294,7 @@ jobs:
         env:
           VENDING_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
           PLATFORM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          PACKAGES_ENABLED: ${{ steps.mode.outputs.effective }}
+          PACKAGES_ENABLED: ${{ steps.mode.outputs.packages }}
         run: |
           if [ -n "$VENDING_CLIENT_ID" ]; then
             echo "Using the dedicated identity (AZURE_VENDING_CLIENT_ID)."
@@ -376,7 +359,7 @@ jobs:
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done
-          echo "::error::init failed after 3 attempts. If the message mentions a missing ref or 'couldn't find remote ref', both module repos must be tagged at the version main.tf pins — access-vending and access-packages are pinned to the SAME tag on purpose, because they share a versioned contract."
+          echo "::error::init failed after 3 attempts. If the message mentions a missing ref or \"couldn't find remote ref\", the module pins in main.tf point at something that does not exist in the module repos — check the refs rather than retrying. Both modules are pinned deliberately in lockstep because they share a versioned contract."
           exit 1
 
       - name: Terraform Validate
@@ -411,15 +394,12 @@ jobs:
           echo "OK — no demo eligibility in plan."
 
       # ------------------------------------------------------------------------
-      # Guard the destructive half of the component switch.
+      # Guard the destructive direction of the component switch.
       #
-      # Two checks rather than one, because they catch different mistakes:
-      #
-      #   Config-level  the run narrows against the committed record. Known before
-      #                 the plan, and the clearer message of the two.
-      #   Plan-level    the plan deletes access package resources for ANY reason —
-      #                 including a tfvars commit that flipped the flag, which the
-      #                 config-level check cannot see.
+      # Read from the PLAN rather than from the inputs, because the plan is the only
+      # thing that knows what already exists. Selecting groups-and-pim on a tenant
+      # that never had packages deletes nothing and passes silently; selecting it
+      # after they were deployed deletes them and is caught here.
       #
       # Deliberately not applied to `destroy`: asking for a destroy is already an
       # explicit request to remove everything.
@@ -427,7 +407,6 @@ jobs:
       - name: Guard access package deletion
         if: inputs.action == 'apply'
         env:
-          NARROWING: ${{ steps.mode.outputs.narrowing }}
           CONFIRMED: ${{ inputs.confirm_remove_access_packages }}
         run: |
           terraform show -no-color tfplan > plan.txt
@@ -436,13 +415,13 @@ jobs:
           DELETING=$(grep -cE "$DESTROY_RE" plan.txt || true)
           echo "Access package resources marked for deletion: ${DELETING:-0}"
 
-          if [ "$NARROWING" = "true" ] || [ "${DELETING:-0}" -gt 0 ]; then
+          if [ "${DELETING:-0}" -gt 0 ]; then
             if [ "$CONFIRMED" != "true" ]; then
-              echo "::error::This apply would DELETE catalogs and/or access packages ($DELETING resource(s)). Users lose their assignments and have to request access again; any resource role finished by hand in the portal is lost with the package. Groups, RBAC bindings and PIM policies are NOT affected. Re-run with confirm_remove_access_packages = true if that is intended."
+              echo "::error::This apply would DELETE $DELETING catalog/access-package resource(s). Users lose their assignments and have to request access again, and any resource role finished by hand in the portal is lost with the package. Groups, RBAC bindings and PIM policies are NOT affected. Re-run with confirm_remove_access_packages = true if that is intended."
               grep -E "$DESTROY_RE" plan.txt || true
               exit 1
             fi
-            echo "::warning::Deleting access package resources, confirmed by input."
+            echo "::warning::Deleting $DELETING access package resource(s), confirmed by input."
           else
             echo "OK — no access package deletions in plan."
           fi
@@ -504,7 +483,7 @@ jobs:
       # Gate 1 — only when access packages are part of the run
       # ------------------------------------------------------------------------
       - name: Gate 1 summary (catalogs, access packages)
-        if: inputs.action == 'apply' && steps.mode.outputs.effective == 'true'
+        if: inputs.action == 'apply' && steps.mode.outputs.packages == 'true'
         run: |
           {
             echo "### Gate 1 — catalogs and access packages"
@@ -537,7 +516,7 @@ jobs:
       # model cannot be expressed in Terraform today, and a green apply says
       # nothing about them.
       - name: Manual steps Terraform could not do
-        if: inputs.action == 'apply' && steps.mode.outputs.effective == 'true'
+        if: inputs.action == 'apply' && steps.mode.outputs.packages == 'true'
         run: |
           {
             echo "### :warning: Finish by hand"
@@ -556,7 +535,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Next step when packages are disabled
-        if: inputs.action == 'apply' && steps.mode.outputs.effective != 'true'
+        if: inputs.action == 'apply' && steps.mode.outputs.packages != 'true'
         run: |
           {
             echo "### Access packages are not deployed"
@@ -571,8 +550,10 @@ jobs:
             echo "2. Run \`scripts/verify-entitlement-management.sh\` from the access-packages"
             echo "   repo. Eligible group membership in access packages needs **Entra ID"
             echo "   Governance or Entra Suite** — P2 alone fails partway through the apply."
-            echo "3. Grant \`EntitlementManagement.ReadWrite.All\` to the deploy identity."
-            echo "4. Set \`enable_access_packages = true\` in \`terraform.tfvars\` and open a PR."
+            echo "3. Grant \`EntitlementManagement.ReadWrite.All\` to the deploy identity,"
+            echo "   with admin consent."
+            echo "4. Re-run this workflow with \`components: groups-pim-and-access-packages\`."
+            echo "   Nothing to commit — the choice lives on the workflow, not in tfvars."
             echo ""
             echo "\`terraform output contract\` shows exactly what the packages would be built"
             echo "from, before enabling them."
