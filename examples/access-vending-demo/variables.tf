@@ -77,6 +77,23 @@ variable "cloud_prefix" {
   default     = "azure"
 }
 
+variable "default_catalog" {
+  description = <<-EOT
+    Catalog label for scopes that do not set `catalog` themselves.
+
+    The access-vending module creates no catalogs. It validates the label and
+    forwards it in its contract; the access-packages module creates or adopts one
+    catalog per distinct label. So adding a catalog is one word on a scope in
+    terraform.tfvars, with no code change on either side.
+
+    A catalog in Entra is a DELEGATION boundary — who may add resources to it and
+    manage packages inside it. Track ownership with it, not environment. One
+    identity team owning everything means one catalog is correct.
+  EOT
+  type        = string
+  default     = "cloud-access"
+}
+
 variable "group_description_template" {
   description = <<-EOT
     Template for the group description. Placeholders: {cloud}, {sub}, {role},
@@ -111,4 +128,159 @@ variable "pim_group_propagation_delay" {
   EOT
   type        = string
   default     = "30s"
+}
+
+# ==============================================================================
+# Access packages — the second module
+#
+# Everything below is inert while enable_access_packages is false. It is declared
+# unconditionally so that flipping the switch does not also require adding
+# variables, and so a reviewer can see the whole intended shape in one file.
+# ==============================================================================
+
+variable "enable_access_packages" {
+  description = <<-EOT
+    Whether to create catalogs and access packages on top of the groups and PIM
+    policies.
+
+      false  groups + PIM only. Gate 2 exists; nothing is requestable yet. The
+             right first step on a new tenant: verify group naming and test
+             activation with a hand-added member before any package exists.
+
+      true   the full chain. Catalogs, access packages and assignment policies.
+
+    Committed default is false. Flip it after
+    scripts/verify-entitlement-management.sh confirms this tenant can actually do
+    entitlement management — eligible group membership in access packages needs
+    Entra ID Governance or Entra Suite, NOT P2 alone, and a P2-only tenant will
+    fail at apply rather than at plan.
+
+    The deploy workflow can narrow a run to groups+PIM without editing this file,
+    but narrowing after packages exist is a DESTROY of the catalogs and packages.
+    The workflow refuses that without an explicit confirmation input.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "catalogs" {
+  description = <<-EOT
+    Per-catalog settings, keyed on the catalog LABEL used by scopes in
+    access_scopes.
+
+    Every key is optional — a label with no entry here gets the defaults, so the
+    single-catalog case needs nothing at all. A key that does not match a label
+    actually in use is REJECTED rather than ignored: an override with no effect is
+    a change you believe you made and did not.
+
+    Fields, all optional:
+      display_name              defaults to the label
+      description
+      externally_visible        default false. Every scope here grants cloud
+                                access and none of it is meant for guests.
+      published                 default true. False makes the catalog's packages
+                                non-requestable without deleting them.
+      adopt_existing            default false. True looks the catalog up instead
+                                of creating it, for customers whose identity team
+                                owns catalog creation.
+      delegate_to_systemeier    default false. True gives the scope's systemeier a
+                                catalog role, so package management sits with the
+                                people who already approve gate 1. Off by default
+                                because it is a standing grant.
+      systemeier_catalog_role   default "Access package manager". Prefer it over
+                                "Catalog owner": a catalog owner can add arbitrary
+                                resources, which routes around access-vending
+                                entirely.
+
+    The type is `any` for the same reason as access_scopes: the module owns the
+    schema and its validations, and repeating them here would guarantee drift.
+  EOT
+  type        = any
+  default     = {}
+}
+
+variable "access_package_defaults" {
+  description = <<-EOT
+    Gate 1 (request-side) settings applied to every access package unless a scope
+    overrides them.
+
+    Defaults fail safe: approval is always required and the assignment expires on
+    its own. Forgetting a field gives you more control, not less.
+
+    Fields, all optional:
+      assignment_duration_days  how long an approved assignment lasts. Short
+                                durations are this setup's substitute for access
+                                reviews: it expires and the user asks again. Must
+                                stay at or below the per-role ceiling the
+                                access-vending contract reports as
+                                max_assignment_days, or Entitlement Management and
+                                PIM drift apart — PIM expires the eligibility
+                                while the package still lists the user as
+                                assigned. The module enforces this at plan time.
+      requestor_scope_type      who may request. Default
+                                AllExistingDirectoryMemberUsers.
+      require_justification     default true.
+      approval_timeout_days     gate 1 timeout only. Gate 2 (PIM activation) has
+                                its own fixed 24-hour timeout that nothing here
+                                can change.
+      grant_approver_group      default true. Also grants the scope's approver
+                                group through the package, making everyone in the
+                                scope a peer approver. This is what fixes the
+                                single-systemeier deadlock: PIM blocks
+                                self-approval, so a lone systemeier cannot
+                                activate their own "dual" role and the request
+                                times out.
+  EOT
+  type        = any
+  default     = {}
+}
+
+variable "access_package_scope_overrides" {
+  description = <<-EOT
+    Per-scope deviations from access_package_defaults, keyed on scope key. Omitted
+    fields fall back to the defaults.
+
+    Every key must match a scope that actually exists in access_scopes. A typo is
+    rejected, not silently ineffective.
+  EOT
+  type        = any
+  default     = {}
+}
+
+variable "manage_pim_for_groups_roles" {
+  description = <<-EOT
+    Whether to attach roles whose access type is "EligibleMember" to their package
+    anyway, downgraded to "Member".
+
+    Default false. Those roles are then left out of Terraform and listed in the
+    module's excluded_resource_roles and manual_steps_required outputs. Their
+    CATALOG associations are still created, so finishing them by hand is one click
+    on an already-registered resource rather than a full registration.
+
+    Why the gap exists: azuread_access_package_resource_package_association
+    validates access_type to "Member" and "Owner" only. The provider builds the
+    Graph role scope as "{access_type}_{group_object_id}", so the sole barrier is a
+    client-side allowlist — not a missing API. The Entra portal does offer
+    "Eligible Member" for PIM-managed groups.
+
+    Setting this true trades just-in-time for full IaC coverage: the user becomes
+    an ACTIVE member the moment the assignment lands, with standing access to the
+    target cloud. That is a security regression, so it additionally requires
+    acknowledge_m3_active_membership = true.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "acknowledge_m3_active_membership" {
+  description = <<-EOT
+    Explicit acknowledgement that manage_pim_for_groups_roles converts
+    just-in-time eligibility into standing active membership.
+
+    Two flags instead of one because the failure mode is invisible: the apply
+    succeeds, the portal looks correct, and the only symptom is that users hold
+    access they should have had to activate for.
+  EOT
+  type        = bool
+  default     = false
 }

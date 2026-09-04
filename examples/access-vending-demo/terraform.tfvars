@@ -25,6 +25,24 @@
 # Default prefix when a scope does not set `cloud` itself.
 cloud_prefix = "azure"
 
+# ------------------------------------------------------------------------------
+# What gets deployed
+#
+# false = groups + PIM only. Gate 2 exists (who may activate what), but nothing is
+# requestable yet. This is the right first state on a new tenant: verify the group
+# names, test activation with a hand-added member, then turn packages on.
+#
+# Before flipping this to true, run scripts/verify-entitlement-management.sh.
+# Eligible group membership in access packages requires Entra ID Governance or
+# Entra Suite — NOT P2 alone — and a P2-only tenant fails at apply, not at plan.
+# ------------------------------------------------------------------------------
+enable_access_packages = false
+
+# Catalog label for scopes that do not set `catalog` themselves. A catalog is a
+# DELEGATION boundary in Entra: whoever holds a catalog role can add resources and
+# manage every package in it. Track ownership with it, not environment.
+default_catalog = "cloud-access"
+
 # false on purpose — a group owner can bypass the access package entirely, and
 # because membership is managed outside Terraform the bypass never shows in a plan.
 set_systemeier_as_group_owner = false
@@ -48,6 +66,10 @@ access_scopes = {
 
   "platform-demo" = {
     cloud = "azure"
+
+    # Omitted, so this scope lands in the default catalog "cloud-access".
+    # One word here is all it takes to move it somewhere else.
+    # catalog = "platform"
 
     # REPLACE with a real subscription GUID before applying.
     scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
@@ -107,6 +129,10 @@ access_scopes = {
   "sandbox" = {
     cloud = "aws"
 
+    # Its own catalog, so it can be delegated separately later — a sandbox is the
+    # obvious first thing to hand to a team, and nothing else has to move.
+    catalog = "sandboxes"
+
     # Documentation only for pim_for_groups — no resource binds it.
     scope_id = "123456789012"
 
@@ -159,10 +185,16 @@ access_scopes = {
   # 4. These groups are role-assignable, which is FORCE-REPLACE in Entra. They
   #    cannot be converted later or reused by the other mechanisms, so keep
   #    entra_role roles in their own scope.
+  #
+  # 5. Give it its own catalog if you do enable it. Terraform enforces no
+  #    activation rules here, so gate 1 — one systemeier approval on the access
+  #    package — is the ENTIRE control. A separate catalog makes that visible in a
+  #    listing instead of buried among harmless packages.
   # ============================================================================
 
   # "tenant" = {
   #   cloud      = "entra"
+  #   catalog    = "directory-roles"        # keep it out of cloud-access
   #   scope_id   = "/"                      # or "/administrativeUnits/<guid>"
   #   systemeier = ["demo.identityowner@example.com"]
   #
@@ -175,3 +207,116 @@ access_scopes = {
   #   }
   # }
 }
+
+# ==============================================================================
+# ACCESS PACKAGES — gate 1
+#
+# Inert while enable_access_packages = false. Committed anyway, so turning the
+# switch on is a one-line diff and the intended shape is reviewable before it is
+# live.
+#
+# Nothing below names a group, a role or a scope's contents. All of that comes from
+# access_scopes above, through the access-vending module's contract. Adding a role
+# up there gives it a package down here with no change to this section.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Catalogs — keyed on the LABEL used by scopes above
+#
+# Every key is optional. Both labels appear here only to name them properly; drop
+# either block and it still works with the label as its display name.
+# ------------------------------------------------------------------------------
+catalogs = {
+
+  "cloud-access" = {
+    display_name = "Cloud Access"
+    description  = "Terraform-vended access to Azure subscriptions. Membership is not privilege here — PIM activation is."
+
+    # false: every scope in this catalog grants cloud access, and none of it is
+    # intended for guests.
+    externally_visible = false
+
+    # Left false. Delegation is a standing grant, and standing grants are the
+    # default no in this setup. Turn it on when a platform team should own its own
+    # packages, and prefer "Access package manager" over "Catalog owner" — a
+    # catalog owner can add arbitrary resources, which routes around access
+    # vending entirely.
+    delegate_to_systemeier = false
+  }
+
+  "sandboxes" = {
+    display_name = "Sandbox Access"
+    description  = "AWS sandbox accounts. Group membership itself is activated through PIM for Groups."
+
+    # The sandbox is the obvious first thing to delegate, so this is where it
+    # would go first. Still off until someone decides to.
+    delegate_to_systemeier  = false
+    systemeier_catalog_role = "Access package manager"
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Gate 1 defaults — applied to every package unless a scope overrides them
+# ------------------------------------------------------------------------------
+access_package_defaults = {
+
+  # 14 days. Short durations are this setup's substitute for access reviews: the
+  # assignment expires and the user asks again, in a request that leaves a record.
+  #
+  # Must stay at or below the per-role ceiling in `terraform output
+  # assignment_ceilings`. The sandbox admin role sets P15D, so anything above 15
+  # days there would let PIM expire the eligibility while the package still lists
+  # the user as assigned. The module fails the plan rather than allowing it.
+  assignment_duration_days = 14
+
+  requestor_scope_type  = "AllExistingDirectoryMemberUsers"
+  require_justification = true
+
+  # Gate 1 only. Gate 2 — PIM activation — has its own fixed 24-hour timeout that
+  # nothing in either module can change.
+  approval_timeout_days = 7
+
+  # true, and it matters. The access-vending module seeds each approver group with
+  # that scope's systemeier so a "dual" role works from the first apply. But PIM
+  # blocks self-approval, so a scope with exactly ONE systemeier deadlocks: the
+  # lone owner cannot approve their own activation and the request times out.
+  # Granting the approver group through the package makes everyone in the scope a
+  # peer approver, which resolves it. `terraform output peer_approval_status`
+  # reports where this is needed.
+  grant_approver_group = true
+}
+
+# ------------------------------------------------------------------------------
+# Per-scope deviations. Only where you differ from the defaults.
+# ------------------------------------------------------------------------------
+access_package_scope_overrides = {
+
+  # sandbox-admin sets active_assignment_expire_after = "P15D", so the package
+  # assignment must not outlive it. 14 would pass; 10 leaves headroom if someone
+  # tightens the PIM policy later without reading this file.
+  "sandbox" = {
+    assignment_duration_days = 10
+    question_text            = "Which sandbox account, and what are you testing?"
+  }
+}
+
+# ------------------------------------------------------------------------------
+# EligibleMember — both false, deliberately
+#
+# azuread_access_package_resource_package_association validates access_type to
+# "Member" and "Owner" only. The provider builds the Graph role scope as
+# "{access_type}_{group_object_id}", so the barrier is a client-side allowlist, not
+# a missing API — the Entra portal does offer "Eligible Member" for PIM-managed
+# groups.
+#
+# While these are false, the two aws-sandbox-* roles are registered as catalog
+# resources but NOT attached to their package. Finishing them is one click each in
+# the portal. `terraform output manual_steps_required` has the path.
+#
+# Setting them true attaches those roles as "Member", which makes the user an
+# ACTIVE member the moment the assignment lands — standing AWS access instead of
+# just-in-time. The apply succeeds, the portal looks right, and nothing fails.
+# That is why it takes two flags.
+# ------------------------------------------------------------------------------
+manage_pim_for_groups_roles      = false
+acknowledge_m3_active_membership = false

@@ -11,7 +11,9 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 │   │   ├── variables.tf                     # Variable declarations
 │   │   └── versions.tf                      # Provider and backend configuration
 │   ├── storage-demo/                        # Self-hosted runner test (storage account)
-│   └── access-vending-demo/                 # Entra groups + RBAC + PIM via access-vending module
+│   └── access-vending-demo/                 # Identity governance: groups + RBAC + PIM,
+│                                            #   optionally catalogs + access packages
+├── docs/steering/                           # Steering docs to paste into the two module repos
 └── .github/workflows/
     ├── deploy-runners.yml                   # Runner platform (generates tfvars from GitHub variables)
     ├── demo-storage.yml                     # storage-demo, on self-hosted runners
@@ -24,9 +26,19 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 |---|---|---|---|---|
 | `runner-demo` | `deploy-runners.yml` | `ubuntu-latest` | OIDC | Deploys the runner platform itself |
 | `storage-demo` | `demo-storage.yml` | self-hosted ACI | runner MI | Proves the runners can create infrastructure |
-| `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | OIDC | Vends access via Entra groups, RBAC bindings and PIM policies |
+| `access-vending-demo` | `deploy-access-vending.yml` (*Deploy Identity Governance*) | self-hosted ACI | OIDC | Entra groups, RBAC bindings and PIM policies — plus catalogs and access packages when enabled |
 
 All three take the same `plan` / `apply` / `destroy` choice on manual dispatch, default `plan`, and all three keep Terraform state on the shared state storage account.
+
+`access-vending-demo` calls **two** modules against **one** state, and its workflow takes a second choice — `components` — for how much of the chain to deploy:
+
+| `components` | Deploys | Use it for |
+|---|---|---|
+| `as-configured` (default) | whatever `terraform.tfvars` says | normal runs; the committed file is the governance record |
+| `groups-and-pim` | groups + RBAC + PIM policies only | standing up a new tenant, before entitlement management is licensed or consented |
+| `groups-pim-and-access-packages` | the full chain | once catalogs and packages are ready |
+
+Selecting `groups-and-pim` when packages already exist **deletes** the catalogs and packages, so an `apply` in that direction needs `confirm_remove_access_packages`. Groups, RBAC and PIM policies are never touched by the switch.
 
 `storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
 

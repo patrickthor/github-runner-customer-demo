@@ -1,10 +1,43 @@
 # ==============================================================================
-# Deploy Access Vending — Entra groups, RBAC bindings and PIM policies
+# Deploy Identity Governance
+#
+# One configuration, one state, two modules:
+#
+#   access-vending    Entra groups + Azure RBAC bindings + PIM activation policies
+#                     GATE 2 — who may activate what, and how.
+#
+#   access-packages   Catalogs + access packages + assignment policies
+#                     GATE 1 — who may enter a scope at all.
 #
 # Runs on the self-hosted ACI runners provisioned by this repo, the same as
-# demo-storage.yml. Manual dispatch only: this configuration decides who can
-# become Owner on a subscription, so an accidental push to main must not change
-# it. Pick the action explicitly.
+# demo-storage.yml. Manual dispatch only: this configuration decides who can become
+# Owner on a subscription, so an accidental push to main must not change it. Pick
+# the action explicitly.
+#
+# ------------------------------------------------------------------------------
+# THE TWO COMPONENT MODES
+#
+#   groups-and-pim                   Module 1 only. Gate 2 exists; nothing is
+#                                    requestable yet. The right first state on a
+#                                    new tenant: verify group naming and test
+#                                    activation with a hand-added member before any
+#                                    package exists.
+#
+#   groups-pim-and-access-packages   Both modules. Catalogs and packages on top.
+#
+#   as-configured (default)          Whatever terraform.tfvars says. This is the
+#                                    honest default, because terraform.tfvars is
+#                                    the committed governance record and a run that
+#                                    silently differs from it is not reproducible.
+#
+# The two explicit modes exist for staged rollout and for narrowing a run without a
+# commit. NARROWING IS DESTRUCTIVE: selecting groups-and-pim when packages already
+# exist deletes the catalogs and packages. That is guarded — see
+# confirm_remove_access_packages below — because the plan for it looks routine.
+#
+# Note that catalogs and access packages are the ONLY things narrowing removes. It
+# never touches groups, RBAC bindings or PIM policies, and PIM onboarding is
+# irreversible regardless.
 #
 # ------------------------------------------------------------------------------
 # REQUIRED GITHUB CONFIGURATION  (Settings -> Secrets and variables -> Actions)
@@ -12,8 +45,8 @@
 #   Secrets:
 #     AZURE_CLIENT_ID          Client ID of the OIDC identity. Reused from the
 #                              runner-platform deploy by default.
-#     AZURE_VENDING_CLIENT_ID  Optional. Set this to run access vending under a
-#                              separate identity; it takes precedence.
+#     AZURE_VENDING_CLIENT_ID  Optional. Set this to run identity governance under
+#                              a separate identity; it takes precedence.
 #     AZURE_TENANT_ID          Entra tenant ID
 #     AZURE_SUBSCRIPTION_ID    Subscription the azurerm provider authenticates to
 #
@@ -23,9 +56,13 @@
 #     STATE_CONTAINER          optional, default: tfstate
 #     VENDING_STATE_KEY        optional, default: access-vending.tfstate
 #
+# ONE state key for both modules. That is the point of the design: the ordering
+# between PIM policies and access packages becomes a dependency in the graph rather
+# than a pipeline convention. See main.tf for why that ordering is not merely
+# tidiness.
+#
 # The state account is NOT created here. deploy-runners.yml already creates it on
-# first run; this workflow connects to it under a separate state key so the two
-# configurations never share a state file.
+# first run; this workflow connects to it under its own state key.
 #
 # ------------------------------------------------------------------------------
 # !! PERMISSIONS THE RUNNER IDENTITY NEEDS — READ BEFORE FIRST RUN !!
@@ -36,44 +73,42 @@
 #
 # By default it reuses AZURE_CLIENT_ID, the identity that deploys the runner
 # platform. That is deliberate: it already holds User Access Administrator on the
-# subscription, Storage Blob Data Contributor on the state account, and a
-# federated credential with the right subject — so there is no second identity to
-# create or manage.
+# subscription, Storage Blob Data Contributor on the state account, and a federated
+# credential with the right subject — so there is no second identity to create.
 #
 # Why not the runner's managed identity, given demo-storage.yml uses it: that
 # identity is attached to the container and shared by every job on the pool.
-# Granting it Group.ReadWrite.All would let anything running there manage any
-# group in the tenant. It would also need Storage Blob Data Contributor added for
-# the remote backend. OIDC costs nothing extra here and avoids both.
+# Granting it Group.ReadWrite.All would let anything running there manage any group
+# in the tenant. OIDC costs nothing extra here and avoids that.
 #
-# To split access vending onto its own identity later, set AZURE_VENDING_CLIENT_ID
-# and grant it the permissions below. The workflow prefers it automatically; no
-# other change is needed.
+# ONE identity runs BOTH modules, and that is not just convenience:
+# azuread_access_package_resource_catalog_association fails with
+# CallerNotResourceOwner when the caller does not own the group being linked, and
+# module 1's identity owns every group it creates. A separate identity for the
+# packages would need group ownership or Catalog owner on top.
 #
 # ------------------------------------------------------------------------------
-# PERMISSIONS THE AUTHENTICATING IDENTITY NEEDS
+# GRAPH PERMISSIONS (application permissions, admin consent required)
 #
-# Azure roles are already in place if you are reusing AZURE_CLIENT_ID. The Graph
-# permissions are NOT — they require a one-time admin consent, and no identity
-# choice avoids that step.
-#
-# Microsoft Graph (application permissions, admin consent required):
+#   Always:
 #     Group.ReadWrite.All
 #     User.Read.All
 #     RoleManagementPolicy.ReadWrite.AzureADGroup
 #     PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup
 #
+#   Additionally when access packages are enabled:
+#     EntitlementManagement.ReadWrite.All
+#
 # Azure RBAC, on each vended subscription (only for azure_pim roles):
 #     User Access Administrator
-#     -- the tighter "Role Based Access Control Administrator" is NOT enough:
-#        it covers the role bindings but not the PIM policies.
+#     -- the tighter "Role Based Access Control Administrator" is NOT enough: it
+#        covers the role bindings but not the PIM policies.
 #
 # Azure RBAC, on the Terraform state storage account:
 #     Storage Blob Data Contributor
 #     -- deploy-runners.yml grants this to AZURE_CLIENT_ID when it creates the
-#        account, so reusing that identity needs nothing here. A separate identity
-#        needs it granted explicitly, or `init` fails with
-#        403 AuthorizationPermissionMismatch on ListBlobs.
+#        account. A separate identity needs it granted explicitly, or `init` fails
+#        with 403 AuthorizationPermissionMismatch on ListBlobs.
 #
 # Setup commands are in examples/access-vending-demo/README.md.
 #
@@ -85,15 +120,16 @@
 # this shares an identity with the platform deploy.
 #
 # ------------------------------------------------------------------------------
-# ORDER OF OPERATIONS
+# LICENSING — the access-packages half can fail at APPLY, not at plan
 #
-# This must apply BEFORE any access-package repo. Not only because the groups
-# must exist: for pim_for_groups the PIM policy must be written first, or the
-# access package resource-role picker offers only "Member" and not "Eligible
-# Member" -- giving standing membership instead of JIT, with nothing failing.
+# Eligible group membership in access packages requires Entra ID Governance or
+# Entra Suite. P2 alone is NOT enough. A P2-only tenant plans cleanly and then
+# fails partway through the apply, so verify before enabling packages:
+#
+#   scripts/verify-entitlement-management.sh   (in the access-packages repo)
 # ==============================================================================
 
-name: Deploy Access Vending
+name: Deploy Identity Governance
 
 on:
   workflow_dispatch:
@@ -108,27 +144,43 @@ on:
           - apply
           - destroy
 
+      components:
+        description: "Which components (as-configured follows terraform.tfvars)"
+        required: true
+        default: as-configured
+        type: choice
+        options:
+          - as-configured
+          - groups-and-pim
+          - groups-pim-and-access-packages
+
+      confirm_remove_access_packages:
+        description: "Required to apply a run that DELETES catalogs/access packages"
+        required: false
+        default: false
+        type: boolean
+
 permissions:
   contents: read
   id-token: write
 
 concurrency:
   # State is a single file. Two concurrent runs give a lock conflict at best.
-  group: access-vending-${{ github.ref }}
+  group: identity-governance-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   terraform:
-    name: Terraform ${{ inputs.action }}
+    name: Terraform ${{ inputs.action }} (${{ inputs.components }})
     runs-on:
       - self-hosted
       - azure
       - container-instance
 
     # Kept on the self-hosted runners so the deployment still exercises the
-    # platform this repo builds. OIDC works identically here and on
-    # ubuntu-latest — `id-token: write` is available on both — so moving this
-    # job off the pool is a one-line change to `runs-on` with no auth rework.
+    # platform this repo builds. OIDC works identically here and on ubuntu-latest
+    # — `id-token: write` is available on both — so moving this job off the pool is
+    # a one-line change to `runs-on` with no auth rework.
 
     defaults:
       run:
@@ -140,12 +192,6 @@ jobs:
       # ARM_CLIENT_ID must be set explicitly here — it deliberately overrides the
       # runner managed identity's client ID that the scaler injects into the
       # container environment.
-      #
-      # This reuses AZURE_CLIENT_ID, the runner-platform deployer. Deliberate: it
-      # already has the state-storage data role and a federated credential with
-      # the right subject, so there is no second identity to manage. Set
-      # AZURE_VENDING_CLIENT_ID to split them later — the workflow prefers it when
-      # present and needs no other change.
       ARM_USE_OIDC: true
       ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -168,17 +214,17 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          # >= 1.9 is a hard requirement: the module's validations use
+          # >= 1.9 is a hard requirement: both modules' validations use
           # cross-variable references, which do not exist before 1.9.
           terraform_version: "~> 1.9"
           terraform_wrapper: false
 
-      # Terraform fetches the access-vending module by cloning it with git. That
-      # clone is anonymous by default, and anonymous requests from the runners'
-      # shared egress IP get rate-limited by GitHub. The response is an auth
-      # challenge, and because there is no terminal to prompt on the clone dies
-      # with "could not read Username for 'https://github.com'" — which reads like
-      # a private-repo problem but is not.
+      # Terraform fetches both modules by cloning them with git. That clone is
+      # anonymous by default, and anonymous requests from the runners' shared
+      # egress IP get rate-limited by GitHub. The response is an auth challenge,
+      # and because there is no terminal to prompt on the clone dies with
+      # "could not read Username for 'https://github.com'" — which reads like a
+      # private-repo problem but is not.
       #
       # GITHUB_TOKEN can read any public repository, so authenticating costs no
       # extra secret and removes the rate limit. Applied globally because
@@ -193,20 +239,92 @@ jobs:
             "https://github.com/"
           echo "Configured authenticated git for github.com."
 
-      - name: Check the vending identity is configured
+      # ------------------------------------------------------------------------
+      # Resolve the component mode BEFORE anything expensive.
+      #
+      # TF_VAR_ always beats terraform.tfvars, so "as-configured" must NOT set the
+      # variable at all — otherwise the committed record could never win.
+      # ------------------------------------------------------------------------
+      - name: Resolve component mode
+        id: mode
+        env:
+          COMPONENTS: ${{ inputs.components }}
+        run: |
+          # What the committed governance record asks for. Absent means false,
+          # which matches the variable's default.
+          CONFIGURED=$(grep -E '^[[:space:]]*enable_access_packages[[:space:]]*=' terraform.tfvars \
+                       | head -1 | grep -oE '(true|false)' || echo "false")
+          echo "terraform.tfvars requests: enable_access_packages = $CONFIGURED"
+
+          case "$COMPONENTS" in
+            as-configured)
+              EFFECTIVE="$CONFIGURED"
+              echo "Following terraform.tfvars. No TF_VAR override set."
+              ;;
+            groups-and-pim)
+              EFFECTIVE="false"
+              echo "TF_VAR_enable_access_packages=false" >> "$GITHUB_ENV"
+              ;;
+            groups-pim-and-access-packages)
+              EFFECTIVE="true"
+              echo "TF_VAR_enable_access_packages=true" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::Unknown components value: $COMPONENTS"
+              exit 1
+              ;;
+          esac
+
+          echo "effective=$EFFECTIVE"   >> "$GITHUB_OUTPUT"
+          echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
+
+          # Narrowing against the committed record. Flagged here, before the plan,
+          # so the reason is visible even if the plan output is long.
+          if [ "$CONFIGURED" = "true" ] && [ "$EFFECTIVE" = "false" ]; then
+            echo "narrowing=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::terraform.tfvars enables access packages but this run selects groups-and-pim. The plan will DELETE the catalogs and access packages. Groups, RBAC and PIM policies are untouched."
+          else
+            echo "narrowing=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "### Components"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Input | \`$COMPONENTS\` |"
+            echo "| terraform.tfvars | \`enable_access_packages = $CONFIGURED\` |"
+            echo "| Effective | \`$EFFECTIVE\` |"
+            echo ""
+            if [ "$EFFECTIVE" = "true" ]; then
+              echo "Deploying **groups + PIM + catalogs + access packages**."
+              echo ""
+              echo "Requires \`EntitlementManagement.ReadWrite.All\` on the deploy identity,"
+              echo "and **Entra ID Governance or Entra Suite** licensing — P2 alone is not"
+              echo "enough and fails partway through the apply, not at plan."
+            else
+              echo "Deploying **groups + PIM only**. Gate 2 exists; nothing is requestable yet."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the deploy identity is configured
         env:
           VENDING_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID }}
           PLATFORM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          PACKAGES_ENABLED: ${{ steps.mode.outputs.effective }}
         run: |
           if [ -n "$VENDING_CLIENT_ID" ]; then
-            echo "Using the dedicated vending identity (AZURE_VENDING_CLIENT_ID)."
+            echo "Using the dedicated identity (AZURE_VENDING_CLIENT_ID)."
           elif [ -n "$PLATFORM_CLIENT_ID" ]; then
-            echo "Using AZURE_CLIENT_ID — the runner-platform deployer — for access vending."
-            echo "It needs the four Graph application permissions in addition to its Azure roles."
-            echo "::notice::Sharing the platform deploy identity with access vending. Its blast radius extends from one subscription to tenant-wide group management. Set AZURE_VENDING_CLIENT_ID to split them."
+            echo "Using AZURE_CLIENT_ID — the runner-platform deployer — for identity governance."
+            echo "::notice::Sharing the platform deploy identity with identity governance. Its blast radius extends from one subscription to tenant-wide group management. Set AZURE_VENDING_CLIENT_ID to split them."
           else
             echo "::error::Neither AZURE_VENDING_CLIENT_ID nor AZURE_CLIENT_ID is set. One of them must hold the client ID of an identity with a federated credential for this repository."
             exit 1
+          fi
+
+          if [ "$PACKAGES_ENABLED" = "true" ]; then
+            echo "::notice::Access packages are enabled. The deploy identity additionally needs the Graph application permission EntitlementManagement.ReadWrite.All, with admin consent. A missing grant surfaces as 403 on the first catalog resource."
           fi
 
       - name: Check terraform.tfvars is present
@@ -232,7 +350,7 @@ jobs:
           # use_azuread_auth: data-plane access via RBAC, not account keys.
           # use_oidc: authenticate the backend with the same federated identity as
           # the providers. That principal needs Storage Blob Data Contributor on
-          # this account — deploy-runners.yml only grants it to AZURE_CLIENT_ID.
+          # this account.
           cat > backend.hcl <<EOF
           resource_group_name  = "$STATE_RG"
           storage_account_name = "$STATE_SA"
@@ -242,11 +360,15 @@ jobs:
           use_oidc             = true
           EOF
 
-          echo "Backend: $STATE_SA/$STATE_CONTAINER/$STATE_KEY"
+          echo "Backend: $STATE_SA/$STATE_CONTAINER/$STATE_KEY (both modules, one state)"
 
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
+      # Both module sources must resolve at init even in groups-and-pim mode:
+      # Terraform fetches every declared module regardless of `count`, and the
+      # reference to module.access_vending.contract has to exist. So a failure here
+      # naming a missing ref is almost always a missing TAG, not a network problem.
       - name: Terraform Init
         run: |
           for attempt in 1 2 3; do
@@ -254,7 +376,7 @@ jobs:
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done
-          echo "All attempts failed"
+          echo "::error::init failed after 3 attempts. If the message mentions a missing ref or 'couldn't find remote ref', both module repos must be tagged at the version main.tf pins — access-vending and access-packages are pinned to the SAME tag on purpose, because they share a versioned contract."
           exit 1
 
       - name: Terraform Validate
@@ -275,8 +397,10 @@ jobs:
         if: inputs.action == 'destroy'
         run: terraform plan -destroy -input=false -out=tfplan
 
+      # ------------------------------------------------------------------------
       # The demo escape hatch grants standing eligibility outside the access
       # package flow. It must never reach a real environment.
+      # ------------------------------------------------------------------------
       - name: Verify no demo eligibility
         if: inputs.action != 'destroy'
         run: |
@@ -285,6 +409,43 @@ jobs:
             exit 1
           fi
           echo "OK — no demo eligibility in plan."
+
+      # ------------------------------------------------------------------------
+      # Guard the destructive half of the component switch.
+      #
+      # Two checks rather than one, because they catch different mistakes:
+      #
+      #   Config-level  the run narrows against the committed record. Known before
+      #                 the plan, and the clearer message of the two.
+      #   Plan-level    the plan deletes access package resources for ANY reason —
+      #                 including a tfvars commit that flipped the flag, which the
+      #                 config-level check cannot see.
+      #
+      # Deliberately not applied to `destroy`: asking for a destroy is already an
+      # explicit request to remove everything.
+      # ------------------------------------------------------------------------
+      - name: Guard access package deletion
+        if: inputs.action == 'apply'
+        env:
+          NARROWING: ${{ steps.mode.outputs.narrowing }}
+          CONFIRMED: ${{ inputs.confirm_remove_access_packages }}
+        run: |
+          terraform show -no-color tfplan > plan.txt
+
+          DESTROY_RE='^[[:space:]]*# .*azuread_access_package.* will be destroyed'
+          DELETING=$(grep -cE "$DESTROY_RE" plan.txt || true)
+          echo "Access package resources marked for deletion: ${DELETING:-0}"
+
+          if [ "$NARROWING" = "true" ] || [ "${DELETING:-0}" -gt 0 ]; then
+            if [ "$CONFIRMED" != "true" ]; then
+              echo "::error::This apply would DELETE catalogs and/or access packages ($DELETING resource(s)). Users lose their assignments and have to request access again; any resource role finished by hand in the portal is lost with the package. Groups, RBAC bindings and PIM policies are NOT affected. Re-run with confirm_remove_access_packages = true if that is intended."
+              grep -E "$DESTROY_RE" plan.txt || true
+              exit 1
+            fi
+            echo "::warning::Deleting access package resources, confirmed by input."
+          else
+            echo "OK — no access package deletions in plan."
+          fi
 
       - name: Plan summary
         run: |
@@ -306,47 +467,134 @@ jobs:
           echo "All attempts failed"
           exit 1
 
-      - name: Output contract
+      # ------------------------------------------------------------------------
+      # Gate 2 — always present
+      # ------------------------------------------------------------------------
+      - name: Gate 2 summary (groups, RBAC, PIM)
         if: inputs.action == 'apply'
         run: |
           {
-            echo "### Contract for the access-package repo"
+            echo "### Gate 2 — groups, RBAC bindings and PIM policies"
             echo ""
-            echo "Group names, keyed \`{scope}--{role}\`:"
-            echo '```json'
-            terraform output -json group_names
+            echo "One line per role: group, mechanism, model, what it grants."
             echo '```'
-            echo "Access type per group — set this on the resource role binding:"
-            echo '```json'
-            terraform output -json access_package_access_type
+            terraform output -json access_summary
             echo '```'
-            echo "Approver groups, keyed on scope (only scopes with a \`dual\` role):"
+            echo "Who approves activation, per role:"
             echo '```json'
-            terraform output -json approver_group_names
+            terraform output -json approvers_by_role
             echo '```'
-            echo "System owners per scope — request-gate approvers:"
+            echo "Catalog label per scope — one catalog per distinct label:"
             echo '```json'
-            terraform output -json systemeier_by_scope
+            terraform output -json catalog_labels
             echo '```'
-            echo "SCIM work list for target clouds (pim_for_groups only):"
+            echo "Assignment ceilings implied by the PIM policies (days). Exceeding one lets"
+            echo "PIM expire the eligibility while the package still lists the user as assigned:"
+            echo '```json'
+            terraform output -json assignment_ceilings
+            echo '```'
+            echo "SCIM work list for target clouds (pim_for_groups only) — Terraform does not"
+            echo "connect these groups to AWS, GCP or GitHub:"
             echo '```json'
             terraform output -json target_cloud_bindings
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ------------------------------------------------------------------------
+      # Gate 1 — only when access packages are part of the run
+      # ------------------------------------------------------------------------
+      - name: Gate 1 summary (catalogs, access packages)
+        if: inputs.action == 'apply' && steps.mode.outputs.effective == 'true'
+        run: |
+          {
+            echo "### Gate 1 — catalogs and access packages"
+            echo ""
+            echo "Catalogs (created here or adopted):"
+            echo '```json'
+            terraform output -json catalogs
+            echo '```'
+            echo "Packages per catalog. A catalog is a delegation boundary, so this listing"
+            echo "is security-relevant:"
+            echo '```json'
+            terraform output -json packages_by_catalog
+            echo '```'
+            echo "What each package actually grants, after exclusions:"
+            echo '```json'
+            terraform output -json granted_groups_by_package
+            echo '```'
+            echo "Request approvers per package:"
+            echo '```json'
+            terraform output -json gate_1_approvers
+            echo '```'
+            echo "Peer approval — a lone systemeier cannot approve their own activation, and"
+            echo "the PIM request timeout is a fixed 24 hours:"
+            echo '```json'
+            terraform output -json peer_approval_status
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # This is the step that matters more than the apply succeeding. Parts of this
+      # model cannot be expressed in Terraform today, and a green apply says
+      # nothing about them.
+      - name: Manual steps Terraform could not do
+        if: inputs.action == 'apply' && steps.mode.outputs.effective == 'true'
+        run: |
+          {
+            echo "### :warning: Finish by hand"
+            echo ""
+            echo "Expected to be non-empty whenever the configuration has \`pim_for_groups\`"
+            echo "roles. The azuread provider validates a resource role's access type to"
+            echo "\`Member\`/\`Owner\` only, so \"Eligible Member\" cannot be set from Terraform."
+            echo "Those groups ARE registered as catalog resources, so each is one click in"
+            echo "the portal rather than a full registration."
+            echo '```json'
+            terraform output -json manual_steps_required
+            echo '```'
+            echo '```json'
+            terraform output -json excluded_resource_roles
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Next step when packages are disabled
+        if: inputs.action == 'apply' && steps.mode.outputs.effective != 'true'
+        run: |
+          {
+            echo "### Access packages are not deployed"
+            echo ""
+            echo "Gate 2 exists — the groups, RBAC bindings and PIM policies are in place —"
+            echo "but nothing is requestable, so no user can obtain access without being"
+            echo "added to a group by hand."
+            echo ""
+            echo "To continue:"
+            echo ""
+            echo "1. Verify the group names and test activation with a hand-added member."
+            echo "2. Run \`scripts/verify-entitlement-management.sh\` from the access-packages"
+            echo "   repo. Eligible group membership in access packages needs **Entra ID"
+            echo "   Governance or Entra Suite** — P2 alone fails partway through the apply."
+            echo "3. Grant \`EntitlementManagement.ReadWrite.All\` to the deploy identity."
+            echo "4. Set \`enable_access_packages = true\` in \`terraform.tfvars\` and open a PR."
+            echo ""
+            echo "\`terraform output contract\` shows exactly what the packages would be built"
+            echo "from, before enabling them."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post-destroy notes
         if: inputs.action == 'destroy'
         run: |
           {
-            echo "### Destroy complete — two things Terraform did not undo"
+            echo "### Destroy complete — what Terraform did not undo"
             echo ""
-            echo "**R4** — \`azuread_directory_role\` does nothing on destroy, so any Entra"
-            echo "directory roles activated by the \`entra_role\` mechanism remain activated"
-            echo "in the tenant."
+            echo "**PIM onboarding is irreversible.** A group that was managed by PIM stays"
+            echo "managed, and deleted groups can linger in the PIM for Groups list for up to"
+            echo "24 hours. Re-applying with the same group names shortly after may hit"
+            echo "friction."
             echo ""
-            echo "**R1** — PIM onboarding is irreversible, and deleted groups can linger in"
-            echo "the PIM for Groups list for up to 24 hours. Re-applying with the same group"
-            echo "names shortly after may hit friction."
+            echo "**\`azuread_directory_role\` does nothing on destroy**, so any Entra directory"
+            echo "roles activated by the \`entra_role\` mechanism remain activated in the tenant."
+            echo ""
+            echo "**Resource roles added by hand in the portal are gone** with their access"
+            echo "package, and are not recorded anywhere in state. Re-check"
+            echo "\`manual_steps_required\` after the next apply."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The token is short-lived and these runners are ephemeral, but leaving a
