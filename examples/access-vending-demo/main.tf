@@ -78,7 +78,7 @@ module "access_vending" {
   # module change can orphan every package association.
   #
   #   008f72c — initial-setup @ 2026-09-04, "reowkr the whole thing"
-  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=008f72c8fd92f8f168cc8ba8d21337931cf72066"
+  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending"
 
   access_scopes = var.access_scopes
 
@@ -104,7 +104,7 @@ module "access_packages" {
   count = var.enable_access_packages ? 1 : 0
 
   #   5a046e5 — inital-commit @ 2026-09-04, "Major rework"
-  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=5a046e5ca0c8353039656ef62387ef7305fc46f5"
+  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages"
 
   # The whole taxonomy, in memory. Scope keys, role keys, group names, group
   # object IDs, access types, catalog labels, the systemeier lists and the
