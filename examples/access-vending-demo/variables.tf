@@ -185,8 +185,14 @@ variable "catalogs" {
     Fields, all optional:
       display_name              defaults to the label
       description
-      externally_visible        default false. Every scope here grants cloud
-                                access and none of it is meant for guests.
+      externally_visible        default false. Set true when the people who
+                                consume the access are B2B GUESTS rather than
+                                member users. Entra checks catalog visibility
+                                BEFORE the assignment policy, so false hides every
+                                package in the catalog from guests regardless of
+                                requestor_scope_type, and reports nothing. It does
+                                not admit anyone outside the directory — a guest
+                                must already be invited and have accepted.
       published                 default true. False makes the catalog's packages
                                 non-requestable without deleting them.
       adopt_existing            default false. True looks the catalog up instead
@@ -226,8 +232,14 @@ variable "access_package_defaults" {
                                 PIM drift apart — PIM expires the eligibility
                                 while the package still lists the user as
                                 assigned. The module enforces this at plan time.
-      requestor_scope_type      who may request. Default
-                                AllExistingDirectoryMemberUsers.
+      requestor_scope_type      who may request. The module default is
+                                AllExistingDirectoryMemberUsers, which is MEMBER
+                                USERS ONLY and excludes guests. Use
+                                AllExistingDirectorySubjects for members and
+                                guests. Note that SpecificDirectorySubjects passes
+                                validation but grants nothing: the module emits no
+                                `requestor` block, so the policy ends up scoped to
+                                specific subjects with none listed.
       require_justification     default true.
       approval_timeout_days     gate 1 timeout only. Gate 2 (PIM activation) has
                                 its own fixed 24-hour timeout that nothing here

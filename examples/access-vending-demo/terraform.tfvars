@@ -252,9 +252,20 @@ catalogs = {
     display_name = "Cloud Access"
     description  = "Terraform-vended access to Azure subscriptions. Membership is not privilege here — PIM activation is."
 
-    # false: every scope in this catalog grants cloud access, and none of it is
-    # intended for guests.
-    externally_visible = false
+    # true, because the people who consume this access are B2B GUESTS in this
+    # tenant, not member users.
+    #
+    # This is the first of two gates an external user has to clear. Entra checks
+    # catalog visibility BEFORE it evaluates the assignment policy, so with this
+    # false a guest sees nothing in My Access no matter what requestor_scope_type
+    # says — and nothing anywhere reports why. The second gate is
+    # requestor_scope_type below, which must also include guests.
+    #
+    # What this does NOT do: it does not let anyone outside the directory request.
+    # A guest must already be invited and have accepted. Users with no account here
+    # would need AllExternalSubjects or a connected organization, neither of which
+    # is configured.
+    externally_visible = true
 
     # Left false. Delegation is a standing grant, and standing grants are the
     # default no in this setup. Turn it on when a platform team should own its own
@@ -267,6 +278,10 @@ catalogs = {
   "sandboxes" = {
     display_name = "Sandbox Access"
     description  = "AWS sandbox accounts. Group membership itself is activated through PIM for Groups."
+
+    # Same reason as cloud-access. Per catalog, not global — so a catalog that
+    # genuinely should stay internal can be left false without affecting the rest.
+    externally_visible = true
 
     # The sandbox is the obvious first thing to delegate, so this is where it
     # would go first. Still off until someone decides to.
@@ -289,7 +304,26 @@ access_package_defaults = {
   # the user as assigned. The module fails the plan rather than allowing it.
   assignment_duration_days = 14
 
-  requestor_scope_type  = "AllExistingDirectoryMemberUsers"
+  # AllExistingDirectorySubjects, not AllExistingDirectoryMemberUsers.
+  #
+  #   AllExistingDirectoryMemberUsers   member users only — EXCLUDES guests
+  #   AllExistingDirectorySubjects      members AND guests already in the directory
+  #
+  # The systemeier here are guests (userType "Guest", the #EXT# UPNs above), so the
+  # member-only scope made every package invisible to the only people meant to use
+  # them. Nothing failed: the packages applied cleanly, showed as published in the
+  # portal, and simply did not appear in My Access.
+  #
+  # Broader options exist and are deliberately NOT used: AllExternalSubjects lets
+  # anyone outside the directory request, and the connected-organization scopes
+  # require a configured partner tenant. This is the narrowest value that includes
+  # the actual users.
+  #
+  # SpecificDirectorySubjects would be narrower still, but the access-package
+  # module emits no `requestor` block — the policy would be scoped to specific
+  # subjects with none listed, so NOBODY could request. Passes validation, grants
+  # nothing. Do not use it until the module supports named requestors.
+  requestor_scope_type  = "AllExistingDirectorySubjects"
   require_justification = true
 
   # Gate 1 only. Gate 2 — PIM activation — has its own fixed 24-hour timeout that

@@ -1,0 +1,88 @@
+diff --git a/modules/access-packages/locals.tf b/modules/access-packages/locals.tf
+index ecdfec5..c69899c 100644
+--- a/modules/access-packages/locals.tf
++++ b/modules/access-packages/locals.tf
+@@ -33,13 +33,32 @@ locals {
+   # repo 1 gets a working catalog here with no configuration at all.
+   # ----------------------------------------------------------------------------
+ 
++  # Split out because `description` below has to branch on it, and a local cannot
++  # reference a sibling attribute of the object it is building.
++  catalog_adopt = {
++    for label in local.catalog_labels : label =>
++    coalesce(try(var.catalogs[label].adopt_existing, null), false)
++  }
++
+   catalog_settings = {
+     for label in local.catalog_labels : label => {
+-      display_name            = coalesce(try(var.catalogs[label].display_name, null), label)
+-      description             = try(var.catalogs[label].description, null)
++      display_name = coalesce(try(var.catalogs[label].display_name, null), label)
++
++      # azuread_access_package_catalog.description is a REQUIRED provider argument, so
++      # leaving it null fails with "The argument description is required" — which
++      # contradicts this module's promise that a catalog label needs no configuration
++      # at all. But the leaf rejects a non-null description when adopting, because the
++      # catalog belongs to another team. So: a default when creating, null when
++      # adopting.
++      description = (
++        local.catalog_adopt[label] ? null : coalesce(
++          try(var.catalogs[label].description, null),
++          "Access packages for Terraform-vended cloud access. Catalog \"${label}\".",
++        )
++      )
+       externally_visible      = coalesce(try(var.catalogs[label].externally_visible, null), false)
+       published               = coalesce(try(var.catalogs[label].published, null), true)
+-      adopt_existing          = coalesce(try(var.catalogs[label].adopt_existing, null), false)
++      adopt_existing          = local.catalog_adopt[label]
+       delegate_to_systemeier  = coalesce(try(var.catalogs[label].delegate_to_systemeier, null), false)
+       systemeier_catalog_role = coalesce(try(var.catalogs[label].systemeier_catalog_role, null), "Access package manager")
+     }
+@@ -222,21 +241,38 @@ locals {
+     )
+   }
+ 
++  # Scopes that actually have a ceiling. Split out so that nothing below is ever
++  # handed a null, and NOT as a matter of taste. Writing it as
++  #
++  #   if local.ceiling_by_scope[s] != null && local.effective[s]... > local.ceiling_by_scope[s]
++  #
++  # reads like a null guard and is not one: Terraform does not guarantee that `&&`
++  # short-circuits, so the `>` still receives the null and the plan dies with
++  #   Error during operation: argument must not be null.
++  # A ternary is not a dependable fix either, for the same reason. Filtering in the
++  # `for` clause is, because the value is never handed to an operator at all.
++  scopes_with_ceiling = [
++    for s in local.scope_keys : s
++    if local.ceiling_by_scope[s] != null
++  ]
++
+   # The role that set the binding ceiling, so the error can name it. The ceiling comes
+   # from one role's PIM policy and the operator needs to know which one.
++  #
++  # Keyed on scopes_with_ceiling, not on every scope. The previous shape indexed [0]
++  # into a list that is empty exactly when the ceiling is null, so evaluating the
++  # ternary's false branch failed with "index out of range" rather than yielding null.
++  # Only scopes_over_ceiling reads this, and that is always a subset.
+   binding_ceiling_role_by_scope = {
+-    for s in local.scope_keys : s => (
+-      local.ceiling_by_scope[s] == null ? null : [
+-        for k, days in local.ceiling_candidates_by_scope[s] : k
+-        if days == local.ceiling_by_scope[s]
+-      ][0]
+-    )
++    for s in local.scopes_with_ceiling : s => [
++      for k, days in local.ceiling_candidates_by_scope[s] : k
++      if days == local.ceiling_by_scope[s]
++    ][0]
+   }
+ 
+   scopes_over_ceiling = [
+-    for s in local.scope_keys : s
+-    if local.ceiling_by_scope[s] != null
+-    && local.effective[s].assignment_duration_days > local.ceiling_by_scope[s]
++    for s in local.scopes_with_ceiling : s
++    if local.effective[s].assignment_duration_days > local.ceiling_by_scope[s]
+   ]
+ 
+   # ----------------------------------------------------------------------------
