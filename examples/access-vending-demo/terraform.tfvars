@@ -119,7 +119,7 @@ access_scopes = {
     # catalog = "platform"
 
     # REPLACE with a real subscription GUID before applying.
-    scope_id = "8f01da4c-6a92-49e3-94ec-847df25de1aa"
+    scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
 
     # Two or more is strongly advised: an approver cannot approve their own
     # request, so a lone systemeier cannot activate their own "dual" role.
