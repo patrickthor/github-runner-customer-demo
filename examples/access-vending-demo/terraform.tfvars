@@ -323,7 +323,7 @@ access_package_defaults = {
   # module emits no `requestor` block — the policy would be scoped to specific
   # subjects with none listed, so NOBODY could request. Passes validation, grants
   # nothing. Do not use it until the module supports named requestors.
-  requestor_scope_type  = "AllExistingDirectorySubjects"
+  requestor_scope_type  = "AllExternalSubjects"
   require_justification = true
 
   # Gate 1 only. Gate 2 — PIM activation — has its own fixed 24-hour timeout that
