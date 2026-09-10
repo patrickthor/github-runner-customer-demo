@@ -2,9 +2,41 @@ terraform {
   required_version = ">= 1.5"
 
   required_providers {
+    # 5.x, and `~>` rather than the previous `>= 4.63`. That old constraint had no
+    # upper bound and this directory had no committed lockfile, so `terraform init`
+    # was already free to install a new major without anyone choosing it. Bounding
+    # it is the point as much as the version bump is.
+    #
+    # The github-runners module has to be 5.0-ready for this to apply. Nothing it
+    # uses was REMOVED in 5.0 — it already uses the modern
+    # azurerm_function_app_flex_consumption and azurerm_service_plan rather than the
+    # deleted azurerm_function_app / azurerm_app_service_plan — but these breaking
+    # changes are hard failures, not warnings, and are the checklist for that repo:
+    #
+    #   azurerm_key_vault           rbac_authorization_enabled is now REQUIRED;
+    #                               the deprecated enable_rbac_authorization is gone
+    #   azurerm_container_registry  georeplications.global_endpoint_routing_enabled
+    #                               is now REQUIRED; the `encryption` block is no
+    #                               longer Computed and defaults to DISABLED, so an
+    #                               omitted block now means "no encryption"
+    #   azurerm_storage_container   storage_account_name removed in favour of
+    #                               storage_account_id
+    #
+    # Softer ones to check in the same pass: azurerm_application_insights
+    # (disable_ip_masking, local_authentication_disabled,
+    # daily_data_cap_notifications_disabled all removed),
+    # azurerm_log_analytics_workspace (internet_ingestion_enabled /
+    # internet_query_enabled replaced by *_access_type),
+    # azurerm_monitor_diagnostic_setting (metric block replaced by enabled_metric,
+    # retention_policy removed), azurerm_servicebus_namespace (minimum_tls_version
+    # rejects 1.0/1.1) and azurerm_storage_account
+    # (allow_nested_items_to_be_public now defaults false).
+    #
+    # `source` is still `ref=main`, which is a separate problem: the provider is now
+    # bounded but the module is not. Pin it to a tag once the 5.x work is tagged.
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = ">= 4.63"
+      version = "~> 5.4.0"
     }
   }
 

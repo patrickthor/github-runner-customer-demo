@@ -190,8 +190,19 @@ jobs:
           use_oidc             = true
           EOF
 
+      # No -upgrade. This repo commits no dependency lock files — provider versions
+      # are pinned at patch level in versions.tf and nowhere else, so there is
+      # nothing for -upgrade to re-resolve past. Keeping the flag would imply a
+      # lockfile exists and is deliberately bypassed, which is not the case.
+      #
+      # It was not harmless before: with `>= 4.63` and no lockfile, -upgrade is how
+      # this deploy moved onto azurerm 5.x without anyone choosing it. The
+      # constraint is now `~> 5.4.0`.
+      #
+      # If lock files are reintroduced (see the note in .gitignore), prefer
+      # `-lockfile=readonly` here.
       - name: Terraform init
-        run: terraform init -input=false -backend-config=backend.hcl -upgrade
+        run: terraform init -input=false -backend-config=backend.hcl
 
       - name: Terraform validate
         run: terraform validate

@@ -3,6 +3,35 @@
 
 # Terraform local artifacts
 .terraform/
+
+# Dependency lock files are deliberately NOT committed in this repo.
+#
+# `terraform init` writes one into the working directory, and the trailing slash
+# above does not exclude it — so without this rule they get picked up by an
+# unqualified `git add` and reappear one directory at a time.
+#
+# The decision: provider versions are controlled by required_providers in each
+# example's versions.tf, pinned to patch level (`~> X.Y.0`), and nowhere else.
+# That keeps one source of truth rather than two that can disagree, which is what
+# was happening — deploy-runners.yml and demo-storage.yml pass `terraform init
+# -upgrade`, which discards the locked version and re-resolves anyway, so the
+# committed lockfiles were already decorative for those two.
+#
+# WHAT THIS COSTS, so nobody has to rediscover it:
+#   * No checksum verification of the provider binary. The lockfile's zh:/h1:
+#     hashes were the only integrity check against a corrupted or substituted
+#     download.
+#   * A past deploy cannot be reproduced exactly. Patch releases inside the
+#     constraint will differ between runs.
+#   * Every provider must be declared in a root's required_providers to be
+#     bounded at all. `time` was NOT, and was pinned only by the lockfile — see
+#     the note on it in access-vending-demo/versions.tf.
+#
+# To reverse: delete this rule, run `terraform init` then
+# `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` in each
+# example, commit the results, and drop `-upgrade` from the workflows so the
+# lockfiles actually govern.
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 *.tfplan

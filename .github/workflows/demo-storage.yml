@@ -100,10 +100,19 @@ jobs:
 
           echo "Backend: $STATE_SA/$RUNNER_STATE_CONTAINER/storage-demo.tfstate"
 
+      # No -upgrade. This repo commits no dependency lock files — provider versions
+      # are pinned at patch level in versions.tf and nowhere else, so there is
+      # nothing for -upgrade to re-resolve past. Keeping the flag would imply a
+      # lockfile exists and is deliberately bypassed, which is not the case.
+      #
+      # If lock files are reintroduced (see the note in .gitignore), prefer
+      # `-lockfile=readonly` here: it fails the run when the lockfile and the
+      # constraints disagree, rather than silently rewriting it inside a container
+      # that is about to be discarded.
       - name: Terraform Init
         run: |
           for attempt in 1 2 3; do
-            terraform init -input=false -backend-config=backend.hcl -upgrade && exit 0
+            terraform init -input=false -backend-config=backend.hcl && exit 0
             echo "Attempt $attempt/3 failed — retrying in 30s..."
             sleep 30
           done

@@ -17,13 +17,25 @@ terraform {
   backend "azurerm" {}
 
   required_providers {
+    # 5.x, and `~>` rather than `>=`. The old `>= 4.63` had no upper bound, so a
+    # fresh init would float into whatever major is current — which is exactly how
+    # a provider upgrade arrives without anyone choosing it.
+    #
+    # This config uses only azurerm_resource_group and azurerm_storage_account.
+    # Checked against the 5.0 breaking changes:
+    #
+    #  * min_tls_version no longer accepts TLS1_0/TLS1_1 — this sets TLS1_2, fine.
+    #  * the queue_properties and static_website blocks were removed — not used.
+    #  * allow_nested_items_to_be_public now defaults to false instead of true.
+    #    Not set here, so expect a one-time in-place update on the first 5.x apply.
+    #    It tightens the account rather than loosening it.
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = ">= 4.63"
+      version = "~> 5.4.0"
     }
     random = {
       source  = "hashicorp/random"
-      version = "~> 3.6"
+      version = "~> 3.9.0"
     }
   }
 }
