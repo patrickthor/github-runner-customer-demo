@@ -140,13 +140,39 @@ variable "catalogs" {
 > `requestor` block or reject the value in `variables.tf`; accepting it as-is is the
 > accepted-and-ignored pattern this project refuses.
 
-### 4. Packages stay one-per-scope
+### 4. Packages: one per scope by default, named packages when needed
 
-An access package grants everything in it atomically, so its natural unit is "membership
-of the team that works on this scope", not "one individual permission". That works because
-repo 1's groups are PIM-managed: membership is not privilege, activation is. A package can
-say "you belong here, here is your baseline plus your escalation paths" and PIM still
-gates each escalation.
+An access package grants everything in it atomically, so its natural default unit is
+"membership of the team that works on this scope", not "one individual permission".
+That works because repo 1's groups are PIM-managed: membership is not privilege,
+activation is. A package can say "you belong here, here is your baseline plus your
+escalation paths" and PIM still gates each escalation.
+
+The `packages` input (added in ccb1476d) lets one scope carry several audiences —
+`prod-engineers` with reader+contributor, `prod-admins` also with owner. The
+per-scope derivation became one way of *generating* `packages`, not a second code
+path, and `scope_overrides` was renamed `package_overrides` because the package is
+now the unit of everything here.
+
+Three things that must stay true:
+
+- **A package may not span scopes.** Gate 1 approval comes from the scope's
+  systemeier, and the provider allows one approval stage per policy, so there is no
+  way to require sign-off from two scopes' owners. Reject it rather than picking a
+  union.
+- **Roles no package names go in `unpackaged_roles`.** A vended group nobody can
+  request is access that exists on paper and cannot be obtained. Report, never drop.
+- **Named packages cannot differentiate activation.** Azure keys the role management
+  policy on (ARM scope, role definition), so every audience holding Contributor on a
+  subscription shares one policy — same MFA, duration, approvers. Only gate 1 varies
+  per package. Say this plainly wherever `packages` is documented, because it is the
+  first thing people assume it does.
+
+> That last point is also why repo 1 rejects two eligible `azure_pim` roles with the
+> same `azure_role` on one `scope_id`. Its policy map is keyed on
+> `"{scope}|{role}"`, so duplicates would collapse and the winner would be decided
+> by iteration order. Duplicating the role buys no governance; the split belongs
+> here.
 
 A package belongs to the catalog of its scope's label. Packages in different catalogs never
 share resource associations, because a catalog resource association is unique per

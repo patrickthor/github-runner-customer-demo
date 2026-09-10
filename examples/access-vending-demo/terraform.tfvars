@@ -119,7 +119,7 @@ access_scopes = {
     # catalog = "platform"
 
     # REPLACE with a real subscription GUID before applying.
-    scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
+    scope_id = "8f01da4c-6a92-49e3-94ec-847df25de1aa"
 
     # Two or more is strongly advised: an approver cannot approve their own
     # request, so a lone systemeier cannot activate their own "dual" role.
@@ -386,9 +386,14 @@ access_package_defaults = {
 }
 
 # ------------------------------------------------------------------------------
-# Per-scope deviations. Only where you differ from the defaults.
+# Per-PACKAGE deviations. Only where you differ from the defaults.
+#
+# Keyed on package name. Because `access_packages` below is empty, each scope still
+# produces one package named after the scope — so "sandbox" is both a scope key and
+# the package name, and this key is unchanged from when the variable was called
+# access_package_scope_overrides.
 # ------------------------------------------------------------------------------
-access_package_scope_overrides = {
+access_package_overrides = {
 
   # sandbox-admin sets active_assignment_expire_after = "P15D", so the package
   # assignment must not outlive it. 14 would pass; 10 leaves headroom if someone
@@ -398,6 +403,42 @@ access_package_scope_overrides = {
     question_text            = "Which sandbox account, and what are you testing?"
   }
 }
+
+# ------------------------------------------------------------------------------
+# Named packages — LEFT EMPTY, so behaviour is one package per scope.
+#
+# Uncomment to split a scope into audiences. A package grants everything in it
+# atomically, so this is the only way to say "engineers get reader and contributor,
+# admins also get owner" on one subscription.
+#
+# It does NOT give the two audiences different activation rules on `contributor`.
+# Azure keys the activation policy on (scope, role), so both share one policy and
+# its MFA, duration and approvers. Only gate 1 — who may request, for how long,
+# approved by whom — differs per package.
+#
+# Any role no package names is reported in `terraform output unpackaged_roles`
+# rather than silently dropped, so splitting a scope will flag what you forgot.
+# ------------------------------------------------------------------------------
+access_packages = {}
+
+# access_packages = {
+#   "platform-engineers" = {
+#     role_keys = ["platform-demo--reader", "platform-demo--contributor"]
+#   }
+#   "platform-admins" = {
+#     role_keys = [
+#       "platform-demo--reader",
+#       "platform-demo--contributor",
+#       "platform-demo--owner",
+#     ]
+#     assignment_duration_days = 7
+#     grant_approver_group     = true
+#   }
+#   # Still needed, or aws-sandbox-* becomes unpackaged.
+#   "sandbox" = {
+#     role_keys = ["sandbox--readonly", "sandbox--admin"]
+#   }
+# }
 
 # ------------------------------------------------------------------------------
 # EligibleMember — both false, deliberately

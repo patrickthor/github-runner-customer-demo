@@ -497,6 +497,16 @@ jobs:
             echo '```json'
             terraform output -json packages_by_catalog
             echo '```'
+            echo "Packages built, with the scope and roles behind each. With no named packages"
+            echo "configured this is one per scope, named after the scope:"
+            echo '```json'
+            terraform output -json packages
+            echo '```'
+            echo "Roles NO package grants — should be empty. A vended group nobody can request"
+            echo "is access that exists on paper and cannot be obtained:"
+            echo '```json'
+            terraform output -json unpackaged_roles
+            echo '```'
             echo "What each package actually grants, after exclusions:"
             echo '```json'
             terraform output -json granted_groups_by_package

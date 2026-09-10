@@ -77,8 +77,11 @@ module "access_vending" {
   # are the resource identity the access packages attach to, so an unintended
   # module change can orphan every package association.
   #
-  #   008f72c — initial-setup @ 2026-09-04, "reowkr the whole thing"
-  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending"
+  #   02e8533d — initial-setup @ 2026-09-10, "Update error message"
+  #              (also carries "Upgrade azurerm to 5.x and stop committing lock
+  #              files", so the module now requires azurerm >= 5.0 — which is why
+  #              versions.tf here pins ~> 5.4.0.)
+  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=02e8533d04832560ecd5c8ec3504ffcc0452f412"
 
   access_scopes = var.access_scopes
 
@@ -103,8 +106,10 @@ module "access_vending" {
 module "access_packages" {
   count = var.enable_access_packages ? 1 : 0
 
-  #   5a046e5 — inital-commit @ 2026-09-04, "Major rework"
-  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages"
+  #   ccb1476d — inital-commit @ 2026-09-10, "support multi access package per
+  #              subscription". This is the commit that renamed scope_overrides to
+  #              package_overrides and added the `packages` input.
+  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=ccb1476db872d62fdde2bc5f68ca06a3ab2a41e0"
 
   # The whole taxonomy, in memory. Scope keys, role keys, group names, group
   # object IDs, access types, catalog labels, the systemeier lists and the
@@ -116,9 +121,30 @@ module "access_packages" {
   # Every key is optional; a label with no entry gets the defaults.
   catalogs = var.catalogs
 
-  # Request-side (gate 1) defaults and per-scope deviations.
-  defaults        = var.access_package_defaults
-  scope_overrides = var.access_package_scope_overrides
+  # Request-side (gate 1) defaults, and per-package deviations from them.
+  #
+  # `package_overrides` was called `scope_overrides` before ccb1476d. The rename is
+  # not cosmetic: the package is now the unit of everything in that module. On the
+  # default path each scope still produces one package NAMED AFTER THE SCOPE, so
+  # existing keys like "sandbox" keep matching and the values are unchanged.
+  defaults          = var.access_package_defaults
+  package_overrides = var.access_package_overrides
+
+  # Named packages. Empty here, which keeps the default behaviour: one package per
+  # scope containing every role in it.
+  #
+  # Set this when a single scope needs more than one audience. A package grants
+  # everything in it atomically, so "engineers get reader+contributor, admins also
+  # get owner" cannot be expressed by a scope-wide package — it needs two packages
+  # over the same groups.
+  #
+  # Note what this is NOT for: giving two audiences DIFFERENT activation rules on
+  # the same Azure role. Azure keys the activation policy on (scope, role), so
+  # there is exactly one policy for Contributor on a subscription and both
+  # audiences share its MFA, duration and approvers. That is also why the vending
+  # module rejects two eligible azure_pim roles with the same azure_role on one
+  # subscription — duplicating the role there would buy nothing.
+  packages = var.access_packages
 
   # Roles whose access type is "EligibleMember" cannot be expressed by the
   # azuread provider — access_type is validated to Member/Owner only. Left false,

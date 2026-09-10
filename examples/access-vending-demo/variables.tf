@@ -256,13 +256,68 @@ variable "access_package_defaults" {
   default     = {}
 }
 
-variable "access_package_scope_overrides" {
+variable "access_package_overrides" {
   description = <<-EOT
-    Per-scope deviations from access_package_defaults, keyed on scope key. Omitted
-    fields fall back to the defaults.
+    Per-package deviations from access_package_defaults, keyed on PACKAGE name.
+    Omitted fields fall back to the defaults.
 
-    Every key must match a scope that actually exists in access_scopes. A typo is
-    rejected, not silently ineffective.
+    Renamed from access_package_scope_overrides. The access-packages module input it
+    feeds was called `scope_overrides` until commit ccb1476d and is now
+    `package_overrides`, because the package is the unit of everything in that
+    module rather than the scope.
+
+    In practice the keys are usually unchanged. On the default path — `packages`
+    unset — each scope still produces exactly one package named after the scope, so
+    a key like "sandbox" still matches. Once you define named packages, the keys
+    here are those package names, not scope keys.
+
+    Every key must match a package that actually exists. A typo is rejected, not
+    silently ineffective.
+  EOT
+  type        = any
+  default     = {}
+}
+
+variable "access_packages" {
+  description = <<-EOT
+    Named access packages, keyed on package name. Empty by default, which keeps one
+    package per scope containing every role in that scope.
+
+    Define packages when a single scope needs more than one audience. An access
+    package grants everything in it atomically, so a scope-wide package cannot
+    express "engineers get reader and contributor, admins also get owner". Two
+    packages over the same groups can:
+
+      access_packages = {
+        "platform-engineers" = {
+          role_keys = ["platform-demo--reader", "platform-demo--contributor"]
+        }
+        "platform-admins" = {
+          role_keys = [
+            "platform-demo--reader",
+            "platform-demo--contributor",
+            "platform-demo--owner",
+          ]
+          assignment_duration_days = 7
+          grant_approver_group     = true
+        }
+      }
+
+    Keys in role_keys are the contract's composite "{scope}--{role}" keys, the same
+    strings `terraform output contract` shows under `roles`.
+
+    Constraints enforced by the module:
+      * every role_keys entry must exist in the contract
+      * a package may not span scopes — gate 1 approval comes from the scope's
+        systemeier, and the provider allows only one approval stage per policy, so
+        there is no way to require sign-off from two scopes' owners
+      * any role that no package names appears in the `unpackaged_roles` output
+        rather than being silently dropped
+
+    What this is NOT for: different activation rules per audience on the same Azure
+    role. Azure keys the activation policy on (scope, role), so both audiences share
+    one policy for Contributor on a subscription — same MFA, duration and approvers.
+    Only the request side (gate 1) can differ per package.
   EOT
   type        = any
   default     = {}

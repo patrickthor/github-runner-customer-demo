@@ -122,7 +122,7 @@ output "catalogs" {
 
 output "packages_by_catalog" {
   description = <<-EOT
-    Which access packages landed in which catalog. null when disabled.
+    Catalog label to { package name = access package ID }. null when disabled.
 
     A catalog is a delegation boundary — whoever holds a catalog role can manage
     every package in it — so this listing is security-relevant, not cosmetic.
@@ -130,18 +130,42 @@ output "packages_by_catalog" {
   value       = one(module.access_packages[*].packages_by_catalog)
 }
 
+output "packages" {
+  description = <<-EOT
+    Every access package that was built, keyed on package name, with the scope and
+    role keys behind it.
+
+    On the default path — var.access_packages empty — there is one package per scope
+    and the package names ARE the scope keys. Read this after defining named
+    packages, to confirm the split landed the way you meant.
+  EOT
+  value       = one(module.access_packages[*].packages)
+}
+
+output "unpackaged_roles" {
+  description = <<-EOT
+    Roles present in the contract that NO package grants. Should be empty.
+
+    Only reachable once var.access_packages is set: naming packages explicitly means
+    a role can be left out, and a vended group nobody can request is access that
+    exists on paper and cannot be obtained. Reported here rather than silently
+    dropped.
+  EOT
+  value       = one(module.access_packages[*].unpackaged_roles)
+}
+
 output "granted_groups_by_package" {
-  description = "What each package actually grants, after EligibleMember exclusions. Compare against contract.roles to see what is missing."
+  description = "What each package actually grants, keyed on package name, after EligibleMember exclusions. Compare against contract.roles to see what is missing."
   value       = one(module.access_packages[*].granted_groups_by_package)
 }
 
 output "gate_1_approvers" {
-  description = "Per package, the systemeier acting as named approvers on the request. Gate 1 decides who may enter a scope at all."
+  description = "Per package name, the systemeier acting as named approvers on the request. Gate 1 decides who may enter a scope at all. A package cannot span scopes, so these always come from a single scope's systemeier."
   value       = one(module.access_packages[*].gate_1_approvers)
 }
 
 output "peer_approval_status" {
-  description = "Where the single-systemeier activation deadlock is resolved by peer approval and where it is not. A lone systemeier cannot approve their own request, and the PIM timeout is a fixed 24 hours."
+  description = "Where the single-systemeier activation deadlock is resolved by peer approval and where it is not. Keyed on SCOPE, not package — it describes gate 2, which the vending module owns. `granted_by_packages` shows which packages hand out the scope's approver group. A lone systemeier cannot approve their own request, and the PIM timeout is a fixed 24 hours."
   value       = one(module.access_packages[*].peer_approval_status)
 }
 
