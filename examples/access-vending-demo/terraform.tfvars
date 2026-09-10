@@ -66,7 +66,52 @@ access_scopes = {
   # systemeier so a "dual" role is activatable from the first apply.
   # ============================================================================
 
-  "platform-demo" = {
+  "platform-engineer" = {
+    cloud = "azure"
+
+    # Omitted, so this scope lands in the default catalog "cloud-access".
+    # One word here is all it takes to move it somewhere else.
+    # catalog = "platform"
+
+    # REPLACE with a real subscription GUID before applying.
+    scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
+
+    # Two or more is strongly advised: an approver cannot approve their own
+    # request, so a lone systemeier cannot activate their own "dual" role.
+    systemeier = [
+      "patrick.thor_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
+      "edgar.grane_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
+    ]
+
+    roles = {
+      # Permanent read. No activation, no approval. The time limit comes from
+      # expiry on the access package assignment in the sister repo.
+      "reader" = {
+        azure_role       = "Reader"
+        permanent_access = true
+      }
+
+      # Requires activation. "dual" = the systemeier AND the approver group
+      # azure-platform-demo-approvers. One signature from either is enough.
+      "contributor" = {
+        azure_role            = "Contributor"
+        approval_type         = "dual"
+        max_activation_hours  = 8
+        require_justification = true
+      }
+
+      # Highest privilege: MFA, short window, ticket reference.
+      "owner" = {
+        azure_role           = "Owner"
+        approval_type        = "dual"
+        max_activation_hours = 2
+        require_mfa          = true
+        require_ticket_info  = true
+      }
+    }
+  }
+
+  "platform-admin" = {
     cloud = "azure"
 
     # Omitted, so this scope lands in the default catalog "cloud-access".
