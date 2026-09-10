@@ -66,52 +66,7 @@ access_scopes = {
   # systemeier so a "dual" role is activatable from the first apply.
   # ============================================================================
 
-  "platform-engineer" = {
-    cloud = "azure"
-
-    # Omitted, so this scope lands in the default catalog "cloud-access".
-    # One word here is all it takes to move it somewhere else.
-    # catalog = "platform"
-
-    # REPLACE with a real subscription GUID before applying.
-    scope_id = "3f1fc96d-69db-4cb6-93d3-0fa2eb9cd79e"
-
-    # Two or more is strongly advised: an approver cannot approve their own
-    # request, so a lone systemeier cannot activate their own "dual" role.
-    systemeier = [
-      "patrick.thor_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
-      "edgar.grane_bouvet.no#EXT#@t16rpocazl.onmicrosoft.com",
-    ]
-
-    roles = {
-      # Permanent read. No activation, no approval. The time limit comes from
-      # expiry on the access package assignment in the sister repo.
-      "reader" = {
-        azure_role       = "Reader"
-        permanent_access = true
-      }
-
-      # Requires activation. "dual" = the systemeier AND the approver group
-      # azure-platform-demo-approvers. One signature from either is enough.
-      "contributor" = {
-        azure_role            = "Contributor"
-        approval_type         = "dual"
-        max_activation_hours  = 8
-        require_justification = true
-      }
-
-      # Highest privilege: MFA, short window, ticket reference.
-      "owner" = {
-        azure_role           = "Owner"
-        approval_type        = "dual"
-        max_activation_hours = 2
-        require_mfa          = true
-        require_ticket_info  = true
-      }
-    }
-  }
-
-  "platform-admin" = {
+  "platform-demo" = {
     cloud = "azure"
 
     # Omitted, so this scope lands in the default catalog "cloud-access".
@@ -386,23 +341,18 @@ access_package_defaults = {
 }
 
 # ------------------------------------------------------------------------------
-# Per-PACKAGE deviations. Only where you differ from the defaults.
+# Per-PACKAGE deviations from access_package_defaults. Keyed on package name.
 #
-# Keyed on package name. Because `access_packages` below is empty, each scope still
-# produces one package named after the scope — so "sandbox" is both a scope key and
-# the package name, and this key is unchanged from when the variable was called
-# access_package_scope_overrides.
+# EMPTY, deliberately. Now that `access_packages` below declares packages
+# explicitly, the same fields are available directly on each package block — so
+# setting them here as well would mean two places configure one package with no
+# obvious precedence.
+#
+# Keep this empty while packages are declared by hand. It earns its keep on the
+# default path, where packages are generated per scope and there is no block to
+# write the deviation into.
 # ------------------------------------------------------------------------------
-access_package_overrides = {
-
-  # sandbox-admin sets active_assignment_expire_after = "P15D", so the package
-  # assignment must not outlive it. 14 would pass; 10 leaves headroom if someone
-  # tightens the PIM policy later without reading this file.
-  "sandbox" = {
-    assignment_duration_days = 10
-    question_text            = "Which sandbox account, and what are you testing?"
-  }
-}
+access_package_overrides = {}
 
 # ------------------------------------------------------------------------------
 # Named packages — LEFT EMPTY, so behaviour is one package per scope.
@@ -419,26 +369,71 @@ access_package_overrides = {
 # Any role no package names is reported in `terraform output unpackaged_roles`
 # rather than silently dropped, so splitting a scope will flag what you forgot.
 # ------------------------------------------------------------------------------
-access_packages = {}
+access_packages = {
 
-# access_packages = {
-#   "platform-engineers" = {
-#     role_keys = ["platform-demo--reader", "platform-demo--contributor"]
-#   }
-#   "platform-admins" = {
-#     role_keys = [
-#       "platform-demo--reader",
-#       "platform-demo--contributor",
-#       "platform-demo--owner",
-#     ]
-#     assignment_duration_days = 7
-#     grant_approver_group     = true
-#   }
-#   # Still needed, or aws-sandbox-* becomes unpackaged.
-#   "sandbox" = {
-#     role_keys = ["sandbox--readonly", "sandbox--admin"]
-#   }
-# }
+  # Engineers: permanent read, plus the ability to activate Contributor. No Owner.
+  "platform-engineers" = {
+    display_name = "Platform Engineer Access"
+    description  = "Day-to-day work on the platform subscription. Contributor is activated through PIM, not held."
+
+    role_keys = [
+      "platform-demo--reader",
+      "platform-demo--contributor",
+    ]
+
+    # false: engineers should not be able to approve each other's Contributor
+    # activation. Approval falls to the systemeier, who are the approver group's
+    # only members.
+    grant_approver_group = false
+  }
+
+  # Admins: everything the engineers get, plus Owner.
+  "platform-admins" = {
+    display_name = "Platform Admin Access"
+    description  = "Elevated access to the platform subscription, including the ability to activate Owner."
+
+    role_keys = [
+      "platform-demo--reader",
+      "platform-demo--contributor",
+      "platform-demo--owner",
+    ]
+
+    # Shorter than the 14-day default. This package is the one that can reach
+    # Owner, so it should be re-requested more often.
+    assignment_duration_days = 7
+
+    # true, and only here. Members of this package become peers in
+    # azure-platform-demo-approvers, so admins can approve each other's
+    # activations. PIM blocks self-approval, so with only two systemeier this is
+    # what keeps "dual" roles activatable as the team grows.
+    grant_approver_group = true
+  }
+
+  # Named explicitly because `access_packages` is no longer empty: once ANY package
+  # is declared, the per-scope default no longer applies and every role must be
+  # named by some package. Leave this out and both aws-sandbox-* groups show up in
+  # `terraform output unpackaged_roles` — vended, but unrequestable.
+  "sandbox" = {
+    display_name = "Sandbox Access"
+
+    role_keys = [
+      "sandbox--readonly",
+      "sandbox--admin",
+    ]
+
+    # sandbox-admin sets active_assignment_expire_after = "P15D", so the package
+    # assignment must not outlive it. 14 would pass; 10 leaves headroom if someone
+    # tightens the PIM policy later without reading this file. The module fails the
+    # plan rather than allowing the drift.
+    assignment_duration_days = 10
+    question_text            = "Which sandbox account, and what are you testing?"
+
+    # Both roles here are pim_for_groups, so both are EligibleMember and neither can
+    # be attached from Terraform. Without the approver group this package would grant
+    # nothing and the module would refuse to build it.
+    grant_approver_group = true
+  }
+}
 
 # ------------------------------------------------------------------------------
 # EligibleMember — both false, deliberately
