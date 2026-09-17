@@ -244,13 +244,12 @@ variable "access_package_defaults" {
       approval_timeout_days     gate 1 timeout only. Gate 2 (PIM activation) has
                                 its own fixed 24-hour timeout that nothing here
                                 can change.
-      grant_approver_group      default true. Also grants the scope's approver
-                                group through the package, making everyone in the
-                                scope a peer approver. This is what fixes the
-                                single-systemeier deadlock: PIM blocks
-                                self-approval, so a lone systemeier cannot
-                                activate their own "dual" role and the request
-                                times out.
+    grant_approver_group is GONE and is now rejected by the module. Approver rights
+    are their own access package — see access_approver_packages. The
+    single-systemeier deadlock it used to solve is still solved, just by requesting
+    the approver package instead: PIM blocks self-approval, so a lone systemeier
+    cannot activate their own "dual" role and the request times out after a fixed 24
+    hours.
   EOT
   type        = any
   default     = {}
@@ -299,7 +298,6 @@ variable "access_packages" {
             "platform-demo--owner",
           ]
           assignment_duration_days = 7
-          grant_approver_group     = true
         }
       }
 
@@ -323,40 +321,45 @@ variable "access_packages" {
   default     = {}
 }
 
-variable "manage_pim_for_groups_roles" {
+variable "access_approver_packages" {
   description = <<-EOT
-    Whether to attach roles whose access type is "EligibleMember" to their package
-    anyway, downgraded to "Member".
+    Per-scope settings for the APPROVER packages, keyed on scope key. Empty by
+    default, which creates one approver package for every scope that has an approver
+    group — i.e. every scope with at least one role using approval_type = "dual".
 
-    Default false. Those roles are then left out of Terraform and listed in the
-    module's excluded_resource_roles and manual_steps_required outputs. Their
-    CATALOG associations are still created, so finishing them by hand is one click
-    on an already-registered resource rather than a full registration.
+    An approver package grants only that scope's {cloud}-{scope}-approvers group and
+    nothing else. Requesting it is how someone gains the right to approve other
+    people's PIM activations in that scope, without also having to hold the access
+    themselves.
 
-    Why the gap exists: azuread_access_package_resource_package_association
-    validates access_type to "Member" and "Owner" only. The provider builds the
-    Graph role scope as "{access_type}_{group_object_id}", so the sole barrier is a
-    client-side allowlist — not a missing API. The Entra portal does offer
-    "Eligible Member" for PIM-managed groups.
+    This replaced `grant_approver_group`, which attached the approver group as a
+    resource role on the access package. That coupled two distinct rights: the
+    approver population was forced to equal the requester population, and nobody
+    could approve without taking the access. The module now REJECTS
+    grant_approver_group in both `defaults` and `packages` rather than
+    reinterpreting it.
 
-    Setting this true trades just-in-time for full IaC coverage: the user becomes
-    an ACTIVE member the moment the assignment lands, with standing access to the
-    target cloud. That is a security regression, so it additionally requires
-    acknowledge_m3_active_membership = true.
+    Fields, all optional:
+      enabled                   default true. false opts the scope out entirely, so
+                                only the systemeier can approve there.
+      display_name              defaults to something generated from the scope.
+      description
+      assignment_duration_days  how long approval rights last. Worth considering
+                                separately from access duration: this grant does not
+                                let you do the work, but it does let you authorise
+                                someone else to.
+      requestor_scope_type      who may request approver rights. Narrower than the
+                                access package is usually the point.
+      require_justification
+      approval_timeout_days
+      question_text
+      hidden
+      requests_accepted
+
+    Gate 1 on an approver package is always the scope's systemeier, never the
+    approver group itself — approvers appointing approvers is an escalation loop with
+    no terminating authority.
   EOT
-  type        = bool
-  default     = false
-}
-
-variable "acknowledge_m3_active_membership" {
-  description = <<-EOT
-    Explicit acknowledgement that manage_pim_for_groups_roles converts
-    just-in-time eligibility into standing active membership.
-
-    Two flags instead of one because the failure mode is invisible: the apply
-    succeeds, the portal looks correct, and the only symptom is that users hold
-    access they should have had to activate for.
-  EOT
-  type        = bool
-  default     = false
+  type        = any
+  default     = {}
 }

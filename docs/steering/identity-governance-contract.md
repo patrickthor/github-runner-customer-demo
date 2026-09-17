@@ -41,7 +41,7 @@ Do not relitigate these without changing this file.
 | **A3** | **No `provider` blocks in any module or submodule.** A module with provider blocks cannot be used with `count`, `for_each` or `depends_on`. Repo 2's module is used with `count` in the reference customer config, so this is load-bearing, not stylistic. CI in both repos asserts it. |
 | **A4** | **Repo 2 never creates a group and never writes a group name.** Repo 1 never creates a catalog or an access package. Neither side reimplements the other's gate. |
 | **A5** | **One shared `terraform.tfvars`, committed.** For an access system the configuration *is* the governance record. Both modules read from the same variable set in the customer root. |
-| **A6** | **Apply order is enforced by the dependency graph, not by convention.** Repo 2's resources depend on repo 1's outputs, so a single apply cannot get the order wrong. This matters concretely: for `pim_for_groups` roles it is the act of writing the PIM policy that onboards the group to PIM for Groups, and until that has happened the platform does not offer `EligibleMember` as a resource role at all. |
+| **A6** | **Apply order is enforced by the dependency graph, not by convention.** Repo 2's resources depend on repo 1's outputs, so a single apply cannot get the order wrong. This matters concretely: for `pim_for_groups` roles it is the act of writing the PIM policy that onboards the group to PIM for Groups, and until that has happened the eligibility carrier cannot be made an eligible member of it. |
 | **A7** | **Reject, never ignore.** A field that the chosen code path does not read must fail validation, not pass silently. A configuration that looks like it controls something it does not is worse than a configuration that refuses to load. |
 | **A8** | **`--` is the reserved composite separator.** Repo 1 validates it out of scope keys and role keys, so repo 2 may split on it safely. |
 
@@ -52,7 +52,7 @@ machine-readable input. Both are this object.
 
 ```hcl
 object({
-  contract_version = number   # 1
+  contract_version = number   # 2
 
   # ---- keyed "{scope}--{role}" ------------------------------------------------
   roles = map(object({
@@ -60,11 +60,17 @@ object({
     role                = string
     group_name          = string
     group_object_id     = string
-    access_type         = string           # "Member" | "EligibleMember"
+    access_type         = string           # always "Member" as of v2
     jit_mechanism       = string           # "azure_pim" | "pim_for_groups" | "entra_role"
     permanent_access    = bool
     target              = string           # the RBAC role / target-cloud role / directory role
     max_assignment_days = optional(number) # ceiling for the package assignment; null = none
+
+    # v2, pim_for_groups only; null for other mechanisms.
+    # group_object_id above is the PLAIN ELIGIBILITY CARRIER the access package
+    # attaches. These name the PIM-managed group that carrier confers eligibility on.
+    pim_group_name      = optional(string)
+    pim_group_object_id = optional(string)
   }))
 
   # ---- keyed "{scope}" --------------------------------------------------------
@@ -107,11 +113,23 @@ apply`, in repo 2, for a change made in repo 1.
 
 ### `access_type` is repo 1's answer, not repo 2's guess
 
-| `jit_mechanism` | `access_type` | What the user activates |
-|---|---|---|
-| `azure_pim` | `Member` | the **role**, in PIM for Azure Resources |
-| `pim_for_groups` | `EligibleMember` | the **membership**, in PIM for Groups |
-| `entra_role` | `Member` | the **directory role**, in PIM for Entra roles |
+| `jit_mechanism` | `access_type` | The package grants Member on | What the user activates |
+|---|---|---|---|
+| `azure_pim` | `Member` | the role group | the **role**, in PIM for Azure Resources |
+| `pim_for_groups` | `Member` | the **eligibility carrier** | the **membership** of the PIM-managed group |
+| `entra_role` | `Member` | the role group | the **directory role**, in PIM for Entra roles |
+
+`pim_for_groups` was `EligibleMember` in v1. It is `Member` in v2 because repo 1 now
+creates a plain carrier group per role and makes *that group* an eligible member of
+the PIM-managed group. Microsoft supports this: a user who is an active member of
+group A, where A is an eligible member of B, can activate their own membership of B —
+and only their own. So the package only ever needs an access type the provider can
+actually set.
+
+**The carrier must never carry access of its own.** No RBAC binding, no SCIM
+provisioning, no app role, no directory role. If anything is bound to it, every
+member holds standing access to the target and PIM is bypassed with nothing failing.
+It must not appear in `target_cloud_bindings`, which is the SCIM work list.
 
 Repo 2 must never default a missing `access_type`. Defaulting it to `Member` turns
 just-in-time eligibility into standing membership: the apply succeeds, the portal looks
@@ -180,35 +198,41 @@ Repo 2 may **republish** repo 1's gate-2 rules in its own outputs so one
 Both repos must describe these the same way. They are real, and they are surfaced rather
 than papered over.
 
-### `EligibleMember` is not in the `azuread` provider
+### `EligibleMember` is not in the `azuread` provider — CLOSED in v2, by avoidance
 
 `azuread_access_package_resource_package_association.access_type` is validated
 client-side to `Member` and `Owner` only. Verified in the provider source: the resource
 builds the Graph role scope as `OriginId = "{access_type}_{group_object_id}"` with
-`DisplayName = access_type`, and the sole barrier is a `StringInSlice` allowlist on the
-schema field. There is no missing API path and no missing resource — it is one line.
+`DisplayName = access_type`, and the sole barrier is a `StringInSlice` allowlist. There
+is no missing API path and no missing resource — it is one line.
 
-Consequences, in the order worth pursuing them:
+**This no longer blocks anything.** Contract v2 routes around it rather than waiting on
+it: repo 1 creates a plain eligibility-carrier group per `pim_for_groups` role and makes
+that group an eligible member of the PIM-managed group, so the package only ever needs
+`Member`. The allowlist is untouched and irrelevant.
 
-1. **Verify licensing first.** Eligible group membership in access packages requires
-   Entra ID Governance or Entra Suite, **not P2 alone**. If the platform rejects it,
-   every workaround below is a dead end including the manual portal step. Run repo 2's
-   `scripts/verify-entitlement-management.sh` and record the result.
-2. **Default behaviour: exclude, register, report.** Roles whose `access_type` is
-   `EligibleMember` get their *catalog* association created but not their *package*
-   association, and appear in repo 2's `excluded_resource_roles` and
-   `manual_steps_required` outputs. The manual portal step is then one click on an
-   already-registered resource.
-3. **A PR to `hashicorp/terraform-provider-azuread`** adding `"EligibleMember"` to the
-   allowlist is small and well-motivated. Worth opening regardless.
-4. **Microsoft's `msgraph` provider** (public preview) can POST the role scope directly
-   and is the IaC-native path until 3 lands. Treat as a spike: nobody here has tested
-   that specific POST. If it is adopted, it goes in repo 2 behind an explicit opt-in and
-   never becomes a required provider for the vending-only path.
+Consequences of that, all of which must stay true:
 
-Full IaC coverage by downgrading `EligibleMember` to `Member` stays available behind
-**two** flags (`manage_pim_for_groups_roles` + `acknowledge_m3_active_membership`),
-because the failure mode is invisible in both plan and portal.
+1. **`manual_steps_required` and `excluded_resource_roles` should be EMPTY** for
+   `pim_for_groups`. They are kept because they still cover anything else the provider
+   cannot express, and an empty list is the useful signal. A non-empty list is now a
+   real finding rather than the known issue.
+2. **`manage_pim_for_groups_roles` and `acknowledge_m3_active_membership` are rejected**,
+   not ignored, and not merely defaulted false. There is no downgrade left to
+   acknowledge, so accepting the flags would imply a choice that no longer exists.
+3. **A PR to `hashicorp/terraform-provider-azuread`** adding `"EligibleMember"` is still
+   small and well-motivated, and would allow a simpler topology with no carrier group.
+   Worth opening, but it is no longer on the critical path.
+4. **The `msgraph` provider spike is dropped.** It existed only to POST the role scope
+   directly. Do not reintroduce a second Graph provider for a solved problem.
+
+**Licensing still needs verifying, and the question has changed.** The old design used
+"eligible group membership in access packages", documented as requiring Entra ID
+Governance or Entra Suite. The v2 design uses plain `Member` plus PIM for Groups. That
+*may* work on a P2-only tenant where the old one could not. Treat as an untested
+hypothesis: run repo 2's `scripts/verify-entitlement-management.sh` and record the
+result rather than assuming either way.
+
 
 ### `entra_role` has no policy resource
 
@@ -256,7 +280,7 @@ privilege-escalation path.
 
 ## Versioning
 
-- `contract_version` is an integer in the contract object. It starts at `1`.
+- `contract_version` is an integer in the contract object. It is `2`; v1 used `EligibleMember` for `pim_for_groups` and had no carrier groups.
 - Repo 2 validates it and fails with a message naming the version it supports and the
   version it received. Never `try()` around a contract field to paper over a mismatch —
   that is how a missing `access_type` becomes standing access.

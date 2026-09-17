@@ -515,6 +515,11 @@ jobs:
             echo '```json'
             terraform output -json gate_1_approvers
             echo '```'
+            echo "Approver packages — requesting one confers the right to approve OTHER"
+            echo "people's PIM activations in that scope, and grants no access itself:"
+            echo '```json'
+            terraform output -json approver_packages
+            echo '```'
             echo "Peer approval — a lone systemeier cannot approve their own activation, and"
             echo "the PIM request timeout is a fixed 24 hours:"
             echo '```json'
@@ -531,11 +536,13 @@ jobs:
           {
             echo "### :warning: Finish by hand"
             echo ""
-            echo "Expected to be non-empty whenever the configuration has \`pim_for_groups\`"
-            echo "roles. The azuread provider validates a resource role's access type to"
-            echo "\`Member\`/\`Owner\` only, so \"Eligible Member\" cannot be set from Terraform."
-            echo "Those groups ARE registered as catalog resources, so each is one click in"
-            echo "the portal rather than a full registration."
+            echo "**Expected to be EMPTY under contract v2.** This used to list every"
+            echo "\`pim_for_groups\` role, because the azuread provider validates a resource"
+            echo "role's access type to \`Member\`/\`Owner\` only and \"Eligible Member\" could not"
+            echo "be set from Terraform. The eligibility-carrier groups remove that gap."
+            echo ""
+            echo "A non-empty list here now means something genuinely could not be expressed."
+            echo "Read it rather than assuming it is the old known issue."
             echo '```json'
             terraform output -json manual_steps_required
             echo '```'

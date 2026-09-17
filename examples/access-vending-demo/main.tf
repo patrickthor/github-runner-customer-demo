@@ -77,11 +77,14 @@ module "access_vending" {
   # are the resource identity the access packages attach to, so an unintended
   # module change can orphan every package association.
   #
-  #   02e8533d — initial-setup @ 2026-09-10, "Update error message"
-  #              (also carries "Upgrade azurerm to 5.x and stop committing lock
-  #              files", so the module now requires azurerm >= 5.0 — which is why
-  #              versions.tf here pins ~> 5.4.0.)
-  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=02e8533d04832560ecd5c8ec3504ffcc0452f412"
+  #   c5154e2b — initial-setup @ 2026-09-17, "Update how approver groups are created"
+  #              Emits CONTRACT VERSION 2. For pim_for_groups roles the module now
+  #              also creates a plain eligibility-carrier group, group_object_id
+  #              points at that carrier, access_type is "Member" for every
+  #              mechanism, and pim_group_* names the PIM-managed group the carrier
+  #              confers eligibility on.
+  #              Also requires azurerm >= 5.0, which is why versions.tf pins ~> 5.4.0.
+  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=c5154e2bc1ec5cb3b633f2f58be2badf61c109c0"
 
   access_scopes = var.access_scopes
 
@@ -106,10 +109,11 @@ module "access_vending" {
 module "access_packages" {
   count = var.enable_access_packages ? 1 : 0
 
-  #   ccb1476d — inital-commit @ 2026-09-10, "support multi access package per
-  #              subscription". This is the commit that renamed scope_overrides to
-  #              package_overrides and added the `packages` input.
-  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=ccb1476db872d62fdde2bc5f68ca06a3ab2a41e0"
+  #   ca48b6cb — inital-commit @ 2026-09-17, "Fix how approverg roups are made"
+  #              Requires contract v2. The approver group moved out of the access
+  #              packages into its own package per scope, configured by
+  #              `approver_packages`; `grant_approver_group` is now REJECTED.
+  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=ca48b6cbce430798cc2b726e6119aeddc1115495"
 
   # The whole taxonomy, in memory. Scope keys, role keys, group names, group
   # object IDs, access types, catalog labels, the systemeier lists and the
@@ -146,13 +150,30 @@ module "access_packages" {
   # subscription — duplicating the role there would buy nothing.
   packages = var.access_packages
 
-  # Roles whose access type is "EligibleMember" cannot be expressed by the
-  # azuread provider — access_type is validated to Member/Owner only. Left false,
-  # so those roles are excluded from Terraform and reported in
-  # manual_steps_required instead of being silently downgraded to standing
-  # membership. See the README before changing either flag.
-  manage_pim_for_groups_roles      = var.manage_pim_for_groups_roles
-  acknowledge_m3_active_membership = var.acknowledge_m3_active_membership
+  # One access package per scope granting only that scope's approver group, so
+  # approval rights are requestable independently of the access itself. Empty here,
+  # which creates one for every scope that has an approver group — i.e. every scope
+  # with a "dual" role.
+  #
+  # This replaced the old `grant_approver_group` flag, which attached the approver
+  # group as a resource role on the access package. That coupled two different
+  # rights: everyone who took the access automatically became a peer approver, and
+  # nobody could approve without holding the access. The module now REJECTS
+  # grant_approver_group rather than reinterpreting it.
+  approver_packages = var.access_approver_packages
+
+  # NOT PASSED: manage_pim_for_groups_roles / acknowledge_m3_active_membership.
+  #
+  # Both now default to null in the module and are rejected if set to anything,
+  # including false. They existed for the EligibleMember gap — the azuread provider
+  # validates a resource role's access_type to Member/Owner only, so PIM-managed
+  # groups could not be attached and had to be finished in the portal.
+  #
+  # Contract v2 removes the gap instead of working around it: the vending module
+  # creates a plain eligibility-carrier group per pim_for_groups role and makes it
+  # an eligible member of the PIM-managed group. The package grants plain Member on
+  # the carrier, the user activates the real membership in PIM, and there is no
+  # downgrade left to acknowledge.
 
   # Belt and braces. The reference to module.access_vending.contract already
   # creates the dependency, but PIM onboarding is the ordering that matters most

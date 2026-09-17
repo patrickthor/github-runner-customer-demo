@@ -52,7 +52,7 @@ request package → [GATE 1] → assigned / eligible → activate in PIM → [GA
 | `platform-demo` (Azure subscription) | `cloud-access` | `azure_pim` | `azure-platform-demo-reader`, `-contributor`, `-owner`, `-approvers` | the **role** |
 | `sandbox` (AWS account) | `sandboxes` | `pim_for_groups` | `aws-sandbox-readonly`, `aws-sandbox-admin`, `-approvers` | the **membership** |
 
-`sandbox-admin` uses `approval_type = "dual"`, and that is load-bearing rather than cosmetic. Both sandbox roles are `pim_for_groups`, so both are `EligibleMember` and neither can be attached to the package from Terraform. `dual` is what makes the vending module create `aws-sandbox-approvers`, which is then the only thing the sandbox package grants — without it the package would grant nothing and the packages module fails the plan rather than publishing something that looks like working access. See [gap 1](#three-gaps-that-are-intentional-not-forgotten).
+`sandbox-admin` uses `approval_type = "dual"`, which is what makes the vending module create `aws-sandbox-approvers`. Under contract v2 that group is granted by its own **approver package**, not bolted onto the access package — and the sandbox access package grants real membership, because each `pim_for_groups` role now has a plain eligibility-carrier group the package can attach as `Member`. See [gap 1](#two-gaps-that-are-intentional-not-forgotten).
 
 The third, `entra_role`, is commented out. Enabling it is a tenant-wide privilege decision, not a demo step — see the notes in `terraform.tfvars`.
 
@@ -182,15 +182,11 @@ Locally: `terraform init -backend-config=backend.hcl`.
 
 State contains subscription IDs, group object IDs, UPNs, PIM policy content and access package configuration in plaintext. Use a storage account with RBAC, not access keys.
 
-## Three gaps that are intentional, not forgotten
+## Two gaps that are intentional, not forgotten
 
-**1. `EligibleMember` cannot be set from Terraform.** `azuread_access_package_resource_package_association` validates `access_type` to `Member` and `Owner` only. The provider builds the Graph role scope as `{access_type}_{group_object_id}`, so the barrier is a client-side allowlist rather than a missing API — the Entra portal *does* offer "Eligible Member" for PIM-managed groups.
+**1. `pim_for_groups` does not connect the group to the target cloud.** That is SCIM on the cloud side. `terraform output target_cloud_bindings` is the work list. Note that the eligibility-carrier groups deliberately do **not** appear there — they must never be provisioned anywhere, or their members would hold standing access and PIM would be bypassed.
 
-So `pim_for_groups` roles are registered as catalog resources but not attached to their package. Finishing them is one click each in the portal. `terraform output manual_steps_required` has the path. Attaching them as `Member` instead would make the user an **active** member the moment the assignment lands — standing cloud access instead of just-in-time, applying cleanly with nothing failing. That is why it takes two flags (`manage_pim_for_groups_roles` **and** `acknowledge_m3_active_membership`).
-
-**2. `pim_for_groups` does not connect the group to the target cloud.** That is SCIM on the cloud side. `terraform output target_cloud_bindings` is the work list.
-
-**3. `entra_role` cannot get activation rules from Terraform.** There is no policy resource for directory roles in the `azuread` provider. MFA, approval and maximum duration are set in the PIM portal, and the gap is visible in `terraform output entra_activation_governance_gap`. Note that for directory roles this means "governed by tenant admins outside Terraform" rather than "open" — active Privileged Role Administrator and Global Administrator do act as default approvers.
+**2. `entra_role` cannot get activation rules from Terraform.** There is no policy resource for directory roles in the `azuread` provider. MFA, approval and maximum duration are set in the PIM portal, and the gap is visible in `terraform output entra_activation_governance_gap`. Note that for directory roles this means "governed by tenant admins outside Terraform" rather than "open" — active Privileged Role Administrator and Global Administrator do act as default approvers.
 
 ## Read these after an apply
 
@@ -210,7 +206,7 @@ Then run `terraform plan` again. It must report **no changes**.
 
 The approver groups are seeded with the systemeier so a `dual` role is activatable from the first apply. But PIM blocks self-approval, so a scope with exactly one systemeier cannot activate its own `dual` role and the request times out after 24 hours — a timeout nothing can configure.
 
-`grant_approver_group = true` (the default) grants the approver group through the access package, making everyone in the scope a peer approver. With packages disabled that fix does not exist, so add a second member to those approver groups by hand first. `terraform output peer_approval_status` reports where this matters.
+Approver rights are their own access package now, created by default for every scope that has an approver group. Requesting it makes you a peer approver without granting you the access itself, so a second person can be added without handing them Owner. With access packages disabled that route does not exist, so add a second member to the approver group by hand first. `terraform output peer_approval_status` reports where this matters, and `terraform output approver_packages` shows the packages.
 
 ## Module pinning
 

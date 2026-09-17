@@ -92,9 +92,11 @@ output "assignment_ceilings" {
     Per composite key, the maximum access-package assignment duration in days
     implied by the group's PIM policy. null means no ceiling.
 
-    Only pim_for_groups roles have one. Exceeding it makes PIM expire the
-    eligibility while the package still lists the user as assigned — they lose
-    access without losing the assignment, and nothing errors.
+    Only pim_for_groups roles have one, and it comes from the PIM-MANAGED group's
+    active_assignment_expire_after — not from the eligibility carrier the package
+    actually grants. Exceeding it makes PIM expire the eligibility while the package
+    still lists the user as assigned: they lose the ability to activate without
+    losing the assignment, and nothing errors.
   EOT
   value = {
     for k, r in module.access_vending.contract.roles : k => r.max_assignment_days
@@ -142,6 +144,19 @@ output "packages" {
   value       = one(module.access_packages[*].packages)
 }
 
+output "approver_packages" {
+  description = <<-EOT
+    Per scope, the approver package that grants that scope's approver group.
+
+    Requesting one of these confers the right to approve OTHER people's PIM
+    activations in the scope, and grants no access itself. Gate 1 on it is always the
+    scope's systemeier. A scope with `enabled = false` in
+    var.access_approver_packages does not appear here, which means the systemeier are
+    its only approvers.
+  EOT
+  value       = one(module.access_packages[*].approver_packages)
+}
+
 output "unpackaged_roles" {
   description = <<-EOT
     Roles present in the contract that NO package grants. Should be empty.
@@ -155,7 +170,15 @@ output "unpackaged_roles" {
 }
 
 output "granted_groups_by_package" {
-  description = "What each package actually grants, keyed on package name, after EligibleMember exclusions. Compare against contract.roles to see what is missing."
+  description = <<-EOT
+    What each package actually grants, keyed on package name.
+
+    For pim_for_groups roles the group named here is the plain ELIGIBILITY CARRIER,
+    not the PIM-managed group. Membership of the carrier is what the package hands
+    out; it confers eligibility to activate the PIM-managed group named alongside it.
+    The carrier itself carries no access — if anything is ever bound to it, every
+    member holds standing access and PIM is bypassed.
+  EOT
   value       = one(module.access_packages[*].granted_groups_by_package)
 }
 
@@ -178,14 +201,16 @@ output "manual_steps_required" {
     What Terraform could NOT do, with the portal path for each item. Read this
     before believing an apply.
 
-    Expected to be non-empty whenever the configuration has pim_for_groups roles:
-    the azuread provider cannot express "Eligible Member" on a resource role, so
-    those attachments are finished by hand.
+    EXPECTED EMPTY under contract v2. It used to list every pim_for_groups role,
+    because the azuread provider cannot set "Eligible Member" on a resource role —
+    the eligibility carrier groups remove that gap. A non-empty list now means
+    something genuinely could not be expressed, so read it rather than assuming it is
+    the old known issue.
   EOT
   value       = one(module.access_packages[*].manual_steps_required)
 }
 
 output "excluded_resource_roles" {
-  description = "Per-group detail behind manual_steps_required: which groups are registered as catalog resources but not attached to their package, and what access type they need."
+  description = "Per-group detail behind manual_steps_required: groups registered as catalog resources but not attached to their package. Expected empty under contract v2 — the eligibility carrier groups mean pim_for_groups roles no longer need the EligibleMember access type."
   value       = one(module.access_packages[*].excluded_resource_roles)
 }

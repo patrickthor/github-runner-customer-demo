@@ -27,7 +27,7 @@ Catalogs, access packages, their resource roles, and their assignment policies �
 ## Changes to land for the two-module contract
 
 The draft is structurally right — one catalog, one package per scope, derivation from repo
-1, `terraform_data` preconditions, two flags on the `EligibleMember` downgrade. What
+1, `terraform_data` preconditions, derivation from the contract. What
 changes is the input surface and catalog support.
 
 ### 1. Replace the twelve-map `vending` input with the contract object
@@ -200,9 +200,11 @@ know which.
 
 - **`terraform_data` + `precondition`, not `check`.** Every failure mode here is invisible
   by default, so warn-and-continue is wrong.
-- **The two-flag `EligibleMember` downgrade.** `manage_pim_for_groups_roles` plus
-  `acknowledge_m3_active_membership`. Two flags because the failure shows up in neither
-  plan nor portal.
+- **`manage_pim_for_groups_roles` and `acknowledge_m3_active_membership` are REJECTED,
+  not accepted-and-ignored, and not defaulted false.** Under contract v2 the eligibility
+  carrier groups mean there is no `EligibleMember` downgrade left to opt into, so
+  accepting the flags would imply a choice that no longer exists. Fail with a message
+  saying why.
 - **Register excluded groups as catalog resources anyway.** Registration is access-type
   agnostic, so it costs nothing and reduces the manual portal step to picking
   "Eligible Member" on an already-registered resource.
@@ -212,8 +214,11 @@ know which.
 - **The peer-approval precondition.** Repo 1 seeds each approver group with its
   `systemeier`, PIM blocks self-approval, so a scope with exactly one systemeier cannot
   activate its own `dual` role and the request times out after 24 hours — a timeout nobody
-  can configure. `grant_approver_group = true` (default on) attaches the approver group to
-  the package, making everyone in the scope a peer approver.
+  can configure. The approver group is its own access package per scope, configured by
+  `approver_packages` and created by default wherever a scope has one. Requesting it
+  confers the right to approve others and grants no access itself, so the approver
+  population is no longer forced to equal the requester population. The old
+  `grant_approver_group` field is rejected in both `defaults` and `packages`.
 - **`excluded_resource_roles` and `manual_steps_required` as outputs.** A green apply says
   nothing about the parts Terraform cannot express. Reading them is a step in the runbook,
   not a footnote.

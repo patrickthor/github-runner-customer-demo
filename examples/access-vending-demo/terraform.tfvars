@@ -330,14 +330,10 @@ access_package_defaults = {
   # nothing in either module can change.
   approval_timeout_days = 7
 
-  # true, and it matters. The access-vending module seeds each approver group with
-  # that scope's systemeier so a "dual" role works from the first apply. But PIM
-  # blocks self-approval, so a scope with exactly ONE systemeier deadlocks: the
-  # lone owner cannot approve their own activation and the request times out.
-  # Granting the approver group through the package makes everyone in the scope a
-  # peer approver, which resolves it. `terraform output peer_approval_status`
-  # reports where this is needed.
-  grant_approver_group = true
+  # grant_approver_group used to live here. It is now REJECTED by the module —
+  # approver rights are their own access package, configured in approver_packages
+  # below. `terraform output peer_approval_status` still reports where a lone
+  # systemeier would otherwise deadlock.
 }
 
 # ------------------------------------------------------------------------------
@@ -381,10 +377,9 @@ access_packages = {
       "platform-demo--contributor",
     ]
 
-    # false: engineers should not be able to approve each other's Contributor
-    # activation. Approval falls to the systemeier, who are the approver group's
-    # only members.
-    grant_approver_group = false
+    # No approver rights are attached here any more, and none can be: the approver
+    # group is a separate package. An engineer who should also be able to approve
+    # requests the approver package on top of this one.
   }
 
   # Admins: everything the engineers get, plus Owner.
@@ -402,11 +397,10 @@ access_packages = {
     # Owner, so it should be re-requested more often.
     assignment_duration_days = 7
 
-    # true, and only here. Members of this package become peers in
-    # azure-platform-demo-approvers, so admins can approve each other's
-    # activations. PIM blocks self-approval, so with only two systemeier this is
-    # what keeps "dual" roles activatable as the team grows.
-    grant_approver_group = true
+    # Holding this package no longer confers approver rights either. That is the
+    # point of the split: an admin who should be able to approve peers requests the
+    # platform-demo approver package as well, and that grant expires on its own
+    # schedule.
   }
 
   # Named explicitly because `access_packages` is no longer empty: once ANY package
@@ -428,30 +422,67 @@ access_packages = {
     assignment_duration_days = 10
     question_text            = "Which sandbox account, and what are you testing?"
 
-    # Both roles here are pim_for_groups, so both are EligibleMember and neither can
-    # be attached from Terraform. Without the approver group this package would grant
-    # nothing and the module would refuse to build it.
-    grant_approver_group = true
+    # Under contract v2 both roles ARE attachable: the vending module creates a plain
+    # eligibility-carrier group per pim_for_groups role, and this package grants plain
+    # Member on those carriers. The user then activates the real, PIM-managed
+    # membership. Before v2 this package granted only the approver group, because
+    # EligibleMember cannot be set from Terraform.
   }
 }
 
 # ------------------------------------------------------------------------------
-# EligibleMember — both false, deliberately
+# APPROVER PACKAGES — one per scope, granting only that scope's approver group.
 #
-# azuread_access_package_resource_package_association validates access_type to
-# "Member" and "Owner" only. The provider builds the Graph role scope as
-# "{access_type}_{group_object_id}", so the barrier is a client-side allowlist, not
-# a missing API — the Entra portal does offer "Eligible Member" for PIM-managed
-# groups.
+# EMPTY, which is the working default: an approver package is created for every
+# scope that has an approver group, i.e. every scope with a role using
+# approval_type = "dual". Here that is both platform-demo and sandbox.
 #
-# While these are false, the two aws-sandbox-* roles are registered as catalog
-# resources but NOT attached to their package. Finishing them is one click each in
-# the portal. `terraform output manual_steps_required` has the path.
+# Requesting one of these is how a person gains the right to approve OTHER people's
+# PIM activations in that scope. It grants no access itself. Gate 1 on it is always
+# the scope's systemeier — approvers cannot appoint approvers, or the chain would
+# have no terminating authority.
 #
-# Setting them true attaches those roles as "Member", which makes the user an
-# ACTIVE member the moment the assignment lands — standing AWS access instead of
-# just-in-time. The apply succeeds, the portal looks right, and nothing fails.
-# That is why it takes two flags.
+# This replaced `grant_approver_group`, which bolted the approver group onto the
+# access package. That forced the approver population to equal the requester
+# population and made it impossible to approve without holding the access. The
+# module now rejects the old field rather than reinterpreting it.
+#
+# Add an entry only to deviate. `enabled = false` opts a scope out entirely, which
+# leaves the systemeier as the only approvers there.
 # ------------------------------------------------------------------------------
-manage_pim_for_groups_roles      = false
-acknowledge_m3_active_membership = false
+access_approver_packages = {}
+
+# access_approver_packages = {
+#   "platform-demo" = {
+#     display_name = "Platform Approver Rights"
+#
+#     # Longer than the access itself (14 days). Approving is a standing duty rather
+#     # than a task, and re-requesting it weekly is friction with no security value —
+#     # it grants no access on its own. Shorten it if approving Owner activation is
+#     # considered privileged enough to warrant review.
+#     assignment_duration_days = 90
+#   }
+#   "sandbox" = {
+#     enabled = false   # only the systemeier approve in the sandbox
+#   }
+# }
+
+# ------------------------------------------------------------------------------
+# NOT HERE ANY MORE: manage_pim_for_groups_roles / acknowledge_m3_active_membership
+#
+# Both are rejected by the module now if set to anything at all, including false.
+#
+# They existed for the EligibleMember gap:
+# azuread_access_package_resource_package_association validates access_type to
+# "Member" and "Owner" only, so a PIM-managed group could not be attached to a
+# package and had to be finished by hand in the portal. The two flags were the
+# opt-in to attaching it as "Member" anyway, which silently converted
+# just-in-time eligibility into standing access.
+#
+# Contract v2 removes the gap instead of working around it. The vending module
+# creates a plain eligibility-carrier group per pim_for_groups role and makes it an
+# eligible member of the PIM-managed group; the package grants plain Member on the
+# carrier, and the user activates the real membership in PIM. Nothing is downgraded,
+# so there is nothing left to acknowledge — and `manual_steps_required` should now
+# come back empty.
+# ------------------------------------------------------------------------------
