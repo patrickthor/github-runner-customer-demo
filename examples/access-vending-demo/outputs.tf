@@ -192,6 +192,35 @@ output "peer_approval_status" {
   value       = one(module.access_packages[*].peer_approval_status)
 }
 
+output "access_reviews_enabled" {
+  description = "Whether recurring access reviews are part of this configuration. Driven by the workflow's deploy_access_reviews checkbox, not by terraform.tfvars."
+  value       = var.enable_access_reviews
+}
+
+output "access_reviews" {
+  description = <<-EOT
+    Per package, the effective review settings, the resolved reviewers, and whether the
+    review is actually deployed.
+
+    `deployed = false` means the configuration exists but enable_access_reviews is off,
+    so no review block was written to the assignment policy. Read this rather than
+    inferring from the presence of configuration.
+  EOT
+  value       = one(module.access_packages[*].access_reviews)
+}
+
+output "access_reviews_configured_not_deployed" {
+  description = <<-EOT
+    Packages that have review configuration while the master switch is off. Should be
+    empty once reviews are deployed.
+
+    This is the state most likely to be misread as "reviews are on" — the tfvars say
+    quarterly, the portal shows none. Non-empty here means tick
+    `deploy_access_reviews` on the workflow.
+  EOT
+  value       = one(module.access_packages[*].access_reviews_configured_not_deployed)
+}
+
 # ------------------------------------------------------------------------------
 # The two outputs that matter more than the apply succeeding
 # ------------------------------------------------------------------------------

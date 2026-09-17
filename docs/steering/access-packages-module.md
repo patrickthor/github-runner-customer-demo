@@ -188,6 +188,44 @@ Persona packages spanning several scopes are a later extension. When they land, 
 driven by *this* repo's variables and touch repo 1 not at all. The resource wiring
 survives; only the scope→package mapping changes.
 
+### 6. Access reviews
+
+`assignment_review_settings` is a nested block on
+`azuread_access_package_assignment_policy`, which this module owns — so reviews live
+here and nowhere else. The vending repo must not gain review resources; `azuread` has
+no `azuread_access_review*` resource at all, and standalone reviews would need the
+`msgraph` provider and are unnecessary anyway, because every grant a human holds comes
+from a package assignment.
+
+Invariants that must hold:
+
+- **`enable_access_reviews` is a caller-set boolean master switch**, not something
+  inferred from whether configuration is present. A pipeline drives it from one
+  checkbox, so the configuration can be written and merged before it goes live.
+- **Presence means on, per package.** No `enabled` field inside the review block — that
+  plus the master switch is two switches at one granularity with no precedence.
+- **`defaults.access_reviews` turns it on for EVERY package with no opt-out.** Document
+  it; it is the surprising half of presence-means-on.
+- **Configured-but-not-deployed must be reported**, not silent. It is the state someone
+  reads as "reviews are on" while the portal shows none.
+- **A reviewed package needs `assignment_duration_days` longer than its review
+  interval.** Otherwise the assignment lapses before the first campaign and the review
+  has an empty subject list. Fail the plan.
+- **The cross-repo case gets its own message.** When the duration is capped below the
+  interval by a role's `active_assignment_expire_after`, the two constraints are
+  unsatisfiable and the fix is in the *other* repo's tfvars. Say so, and name the role.
+- **Reject `review_type = "Manager"`.** B2B guests have no manager attribute, so the
+  campaign falls silently through to the timeout behaviour.
+- **Do not expose `starting_on`.** Graph rejects changes to it after creation and the
+  resource has no `ForceNew`, so a change is an apply-time error rather than a replace.
+- **Keep the recommendation helpers out of the default path.** `access_recommendation_enabled`
+  and `acceptAccessRecommendation` lean on the ID-Governance-gated features; the target
+  tenant is P2 with an all-guest population.
+
+Removing a review block is an **in-place update** — no `ForceNew` anywhere on the
+resource. Nobody loses access; the campaign and its history are what go. Consumers
+should warn rather than block on it.
+
 ### 5. Delete `m3_max_duration_days`
 
 Read `var.vending.roles[*].max_assignment_days` instead. The precondition becomes: for

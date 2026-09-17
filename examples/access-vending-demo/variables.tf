@@ -172,6 +172,41 @@ variable "enable_access_packages" {
   default     = false
 }
 
+variable "enable_access_reviews" {
+  description = <<-EOT
+    MASTER SWITCH for recurring access reviews on the access packages. false by
+    default.
+
+    SET BY THE WORKFLOW, NOT BY terraform.tfvars. The Deploy Identity Governance
+    workflow has a `deploy_access_reviews` checkbox that exports
+    TF_VAR_enable_access_reviews, and a TF_VAR always beats a tfvars entry — so a copy
+    in the governance record could never take effect. Same split as
+    enable_access_packages: the pipeline decides WHETHER, terraform.tfvars decides
+    WHAT.
+
+    Requires access packages. Reviews attach to an assignment policy, so
+    `components: groups-and-pim` with this ticked has nothing to review — the workflow
+    rejects that combination before planning.
+
+    With this false, the module still resolves any `access_reviews` configuration and
+    reports it with `deployed = false`, plus a `access_reviews_configured_not_deployed`
+    list. Configured-but-not-deployed is exactly the state someone would otherwise
+    misread as "reviews are on".
+
+    Turning it from true to false REMOVES the review block. That is an in-place update
+    of the assignment policy — no assignment is dropped and nobody loses access. What
+    is lost is the review campaign and its history, i.e. the audit trail.
+
+    Licensing: the tenant is Entra ID P2, not ID Governance. Basic access reviews are
+    documented as P2-included and entitlement management already works here, but three
+    capabilities need ID Governance and are deliberately not used — inactive-user
+    reviews, user-to-group affiliation recommendations, and catalog (multi-resource)
+    reviews.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "catalogs" {
   description = <<-EOT
     Per-catalog settings, keyed on the catalog LABEL used by scopes in
@@ -244,6 +279,31 @@ variable "access_package_defaults" {
       approval_timeout_days     gate 1 timeout only. Gate 2 (PIM activation) has
                                 its own fixed 24-hour timeout that nothing here
                                 can change.
+      access_reviews            an object turning on a recurring review. CAREFUL: set
+                                here it applies to EVERY package, and there is no
+                                per-package opt-out — presence means on. Prefer setting
+                                it per package unless you genuinely want all of them
+                                reviewed on the same schedule. Fields:
+                                  review_frequency  weekly|monthly|quarterly|
+                                                    halfyearly|annual  (default quarterly)
+                                  review_type       Manager|Reviewers|Self
+                                                    (default Reviewers = the scope's
+                                                    systemeier). Manager is REJECTED by
+                                                    the module: B2B guests have no
+                                                    manager attribute, so the campaign
+                                                    would fall silently through to the
+                                                    timeout.
+                                  duration_in_days  how long each campaign runs
+                                  timeout_behavior  keepAccess|removeAccess|
+                                                    acceptAccessRecommendation
+                                  approver_justification_required
+
+                                A package with a review needs
+                                assignment_duration_days LONGER than the review
+                                interval, or the assignment expires before the first
+                                campaign and the review sees nobody. The module fails
+                                the plan on that.
+
     grant_approver_group is GONE and is now rejected by the module. Approver rights
     are their own access package — see access_approver_packages. The
     single-systemeier deadlock it used to solve is still solved, just by requesting
@@ -304,6 +364,18 @@ variable "access_packages" {
     Keys in role_keys are the contract's composite "{scope}--{role}" keys, the same
     strings `terraform output contract` shows under `roles`.
 
+    Each package also accepts an `access_reviews` object. PRESENCE MEANS ON: a package
+    with the block gets a recurring review, one without gets none. There is no
+    `enabled` field, deliberately — that plus the enable_access_reviews master switch
+    would be two switches at the same granularity with no obvious precedence.
+
+    A reviewed package needs assignment_duration_days LONGER than its review interval
+    (weekly 7, monthly 30, quarterly 90, halfyearly 180, annual 365). Otherwise the
+    assignment expires before the first campaign runs and the review has an empty
+    subject list — governance that enforces nothing. The module fails the plan on it,
+    and fails separately when the duration is capped below the interval by a role's PIM
+    policy, because that fix lives in access_scopes rather than here.
+
     Constraints enforced by the module:
       * every role_keys entry must exist in the contract
       * a package may not span scopes — gate 1 approval comes from the scope's
@@ -355,6 +427,13 @@ variable "access_approver_packages" {
       question_text
       hidden
       requests_accepted
+
+      access_reviews            same object as on a package. Approver rights are
+                                standing and confer authority, so they are arguably the
+                                most important thing to review. Approver packages have
+                                no PIM expiry ceiling, so a long duration paired with a
+                                periodic review is available here in a way it is not
+                                for a pim_for_groups access package.
 
     Gate 1 on an approver package is always the scope's systemeier, never the
     approver group itself — approvers appointing approvers is an escalation loop with

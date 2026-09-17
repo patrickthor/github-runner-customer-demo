@@ -74,6 +74,27 @@ The vending module validates the label and forwards it in its contract. The pack
 
 Choose the boundary to match **delegation**, not environment. A catalog in Entra decides who may add resources to it and manage packages inside it. One identity team owning everything means one catalog is correct and per-scope catalogs are pure overhead. Split when a platform team should own its own packages — `delegate_to_systemeier` in the `catalogs` variable then hands them `Access package manager` on it.
 
+## Access reviews
+
+Two models side by side, deliberately:
+
+| Package | Assignment | Recurring control |
+|---|---|---|
+| `platform-engineers` | 180 days | **quarterly review** by the systemeier |
+| `platform-admins` | 60 days | **monthly review** by the systemeier |
+| `sandbox` | 10 days | **expiry** — no review |
+| approver packages (both) | 180 days | **quarterly review** |
+
+Reviews and short expiry are *alternatives*, not complements. A review on a 7-day assignment sees an empty subject list, because the assignment lapses long before the first campaign runs. The module enforces this: a reviewed package must have `assignment_duration_days` **longer** than its review interval (weekly 7, monthly 30, quarterly 90, halfyearly 180, annual 365).
+
+That is why the reviewed packages have longer durations than before. It *is* a loosening, and the review is what pays for it — Contributor and Owner still require PIM activation with dual approval and MFA every single time.
+
+**`sandbox` has no review, and cannot have one as configured.** `sandbox-admin` sets `active_assignment_expire_after = "P15D"`, which caps the assignment at 15 days, so every interval except weekly outlives what the assignment can live. The module rejects that and points at the vending config, because the fix is to raise `active_assignment_expire_after` in `access_scopes` — trading a longer standing eligibility window for a review someone has to action. Left as-is so the demo shows both models.
+
+All reviews use `removeAccess` on timeout: no response means access ends. That is what separates a review from an attestation exercise. `review_type` is `Reviewers` (the scope's systemeier) — **not** `Manager`, which the module rejects because B2B guests have no manager attribute and the campaign would fall silently through to the timeout.
+
+No extra Graph permission: a review is a field on the assignment policy, covered by `EntitlementManagement.ReadWrite.All`.
+
 ## Before you apply
 
 Replace the placeholders in `terraform.tfvars`:
@@ -103,7 +124,7 @@ It holds no credentials. `tenant_id` and `provider_subscription_id` come from Gi
 
 **Actions → Deploy Identity Governance → Run workflow.** Manual dispatch only: this config decides who can become Owner on a subscription, so an accidental push to `main` must not change it.
 
-Two choices.
+Three choices.
 
 **`action`** — `plan`, `apply` or `destroy`.
 
@@ -117,6 +138,12 @@ Two choices.
 With `groups-and-pim` nothing is requestable: no user can obtain access without being added to a group by hand. It needs no entitlement-management licensing, which is why it is the default and the mode to run first.
 
 The choice sets `TF_VAR_enable_access_packages`, which gates `module "access_packages"`. It is **not** in `terraform.tfvars` — a `TF_VAR` always beats a tfvars entry, so a copy there could never take effect. The switch has exactly one home.
+
+**`deploy_access_reviews`** — a checkbox, off by default. Adds a recurring access review to the packages that have an `access_reviews` block in `terraform.tfvars`. Requires access packages; the workflow rejects the combination with `groups-and-pim` before planning, since a review attaches to an assignment policy.
+
+The split is the same as `components`: **the pipeline decides whether, `terraform.tfvars` decides what.** A `TF_VAR` always beats a tfvars entry, so the on/off switch has exactly one home. With the box unticked, review configuration is still resolved and reported as `deployed = false` — see `terraform output access_reviews_configured_not_deployed`, which is the state most easily misread as "reviews are on".
+
+Unticking it after reviews exist removes them. That is only a **warning**, not a block, because `azuread_access_package_assignment_policy` declares `ForceNew` on nothing: removing the review block is an in-place update, no assignment is dropped and nobody loses access. What is lost is the review campaign and its history.
 
 **Switching back down is destructive.** Selecting `groups-and-pim` after packages exist deletes the catalogs and packages: users lose their assignments, and any resource role finished by hand in the portal goes with it. The workflow reads that out of the plan and refuses the `apply` unless `confirm_remove_access_packages` is set. Groups, RBAC bindings and PIM policies are never affected by the switch.
 

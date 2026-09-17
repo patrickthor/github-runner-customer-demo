@@ -41,6 +41,8 @@ With `groups-and-pim` nothing is requestable, so no user can obtain access witho
 
 Selecting `groups-and-pim` after packages exist **deletes** the catalogs and packages, so an `apply` in that direction needs `confirm_remove_access_packages`. Groups, RBAC and PIM policies are never touched by the switch.
 
+A third input, **`deploy_access_reviews`**, is a checkbox rather than a dropdown value — recurring reviews are orthogonal to *what* gets deployed. It requires access packages, and the workflow rejects the invalid combination before planning.
+
 `storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
 
 **Order matters:** run `deploy-runners.yml` with `apply` first. It creates the state account, the state container `storage-demo` uses, and the role assignment granting the runner identity access to it.

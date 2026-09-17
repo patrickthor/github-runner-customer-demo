@@ -380,6 +380,25 @@ access_packages = {
     # No approver rights are attached here any more, and none can be: the approver
     # group is a separate package. An engineer who should also be able to approve
     # requests the approver package on top of this one.
+
+    # 180 days, NOT the 14-day default. A reviewed package needs a duration longer
+    # than its review interval — quarterly is 90 — or the assignment expires before
+    # the first campaign runs and the review has an empty subject list. The module
+    # fails the plan on that rather than letting it look like governance.
+    #
+    # This IS a loosening compared with 14-day expiry, and the review is what pays
+    # for it. Reader is permanent but read-only; Contributor still requires PIM
+    # activation with dual approval every time.
+    assignment_duration_days = 180
+
+    access_reviews = {
+      review_frequency = "quarterly"
+      review_type      = "Reviewers" # the scope's systemeier
+      duration_in_days = 14          # how long each campaign stays open
+      timeout_behavior = "removeAccess"
+
+      approver_justification_required = true
+    }
   }
 
   # Admins: everything the engineers get, plus Owner.
@@ -393,14 +412,29 @@ access_packages = {
       "platform-demo--owner",
     ]
 
-    # Shorter than the 14-day default. This package is the one that can reach
-    # Owner, so it should be re-requested more often.
-    assignment_duration_days = 7
+    # 60 days with a MONTHLY review, rather than 7-day expiry. Reviewed monthly is a
+    # stronger control than expiring weekly: expiry only proves someone still wants
+    # the access, a review makes a named systemeier confirm they should have it.
+    #
+    # 60 rather than 31 because the duration must exceed the 30-day review interval,
+    # and a value close to the interval means a campaign can open days before the
+    # assignment lapses anyway.
+    assignment_duration_days = 60
 
     # Holding this package no longer confers approver rights either. That is the
     # point of the split: an admin who should be able to approve peers requests the
     # platform-demo approver package as well, and that grant expires on its own
     # schedule.
+
+    # Monthly, because this is the package that can reach Owner.
+    access_reviews = {
+      review_frequency = "monthly"
+      review_type      = "Reviewers"
+      duration_in_days = 14
+      timeout_behavior = "removeAccess"
+
+      approver_justification_required = true
+    }
   }
 
   # Named explicitly because `access_packages` is no longer empty: once ANY package
@@ -427,6 +461,19 @@ access_packages = {
     # Member on those carriers. The user then activates the real, PIM-managed
     # membership. Before v2 this package granted only the approver group, because
     # EligibleMember cannot be set from Terraform.
+
+    # NO access_reviews BLOCK HERE, deliberately — presence would mean on.
+    #
+    # Expiry is this package's recurring control, and the two are alternatives rather
+    # than complements. It also cannot have one as configured: sandbox-admin sets
+    # active_assignment_expire_after = "P15D", which caps the assignment at 15 days, so
+    # every review interval except weekly is longer than the assignment can live. The
+    # module rejects that combination and points at the vending config, because the fix
+    # is to raise active_assignment_expire_after in access_scopes above — trading a
+    # longer standing eligibility window for a review that someone has to action.
+    #
+    # Left as-is so the demo shows both models side by side: platform-* reviewed,
+    # sandbox expiring.
   }
 }
 
@@ -450,22 +497,54 @@ access_packages = {
 # Add an entry only to deviate. `enabled = false` opts a scope out entirely, which
 # leaves the systemeier as the only approvers there.
 # ------------------------------------------------------------------------------
-access_approver_packages = {}
+access_approver_packages = {
 
-# access_approver_packages = {
-#   "platform-demo" = {
-#     display_name = "Platform Approver Rights"
-#
-#     # Longer than the access itself (14 days). Approving is a standing duty rather
-#     # than a task, and re-requesting it weekly is friction with no security value —
-#     # it grants no access on its own. Shorten it if approving Owner activation is
-#     # considered privileged enough to warrant review.
-#     assignment_duration_days = 90
-#   }
-#   "sandbox" = {
-#     enabled = false   # only the systemeier approve in the sandbox
-#   }
-# }
+  "platform-demo" = {
+    display_name = "Platform Approver Rights"
+    description  = "The right to approve other people's PIM activations on the platform subscription. Grants no access of its own."
+
+    # 180 days. Approving is a standing duty rather than a task, and re-requesting it
+    # monthly would be friction with no security value — the grant confers no access.
+    # The recurring control is the review below, not expiry.
+    #
+    # Approver packages have no PIM expiry ceiling (they contain only the approver
+    # group, which is not a pim_for_groups role), so a long duration paired with a
+    # review is available here in a way it is not for the sandbox access package.
+    assignment_duration_days = 180
+
+    # Quarterly, and arguably the most important review in the configuration: this
+    # grant is standing and it confers authority over everyone else's activations.
+    access_reviews = {
+      review_frequency = "quarterly"
+      review_type      = "Reviewers"
+      duration_in_days = 14
+      timeout_behavior = "removeAccess"
+
+      approver_justification_required = true
+    }
+  }
+
+  "sandbox" = {
+    display_name = "Sandbox Approver Rights"
+    description  = "The right to approve activation of aws-sandbox-admin. Grants no access of its own."
+
+    assignment_duration_days = 180
+
+    access_reviews = {
+      review_frequency = "quarterly"
+      review_type      = "Reviewers"
+      duration_in_days = 14
+      timeout_behavior = "removeAccess"
+
+      approver_justification_required = true
+    }
+  }
+
+  # `enabled = false` on a scope opts it out entirely, leaving the systemeier as its
+  # only approvers. Not used here — with one systemeier on sandbox, PIM's
+  # self-approval block would make its "dual" role un-activatable by that person
+  # alone. `terraform output peer_approval_status` reports exactly that.
+}
 
 # ------------------------------------------------------------------------------
 # NOT HERE ANY MORE: manage_pim_for_groups_roles / acknowledge_m3_active_membership

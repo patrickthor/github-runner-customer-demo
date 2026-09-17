@@ -109,11 +109,12 @@ module "access_vending" {
 module "access_packages" {
   count = var.enable_access_packages ? 1 : 0
 
-  #   ca48b6cb — inital-commit @ 2026-09-17, "Fix how approverg roups are made"
-  #              Requires contract v2. The approver group moved out of the access
-  #              packages into its own package per scope, configured by
-  #              `approver_packages`; `grant_approver_group` is now REJECTED.
-  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=ca48b6cbce430798cc2b726e6119aeddc1115495"
+  #   780d2ade — inital-commit @ 2026-09-17, "Implement access reviews in the module"
+  #              Adds recurring access reviews on the assignment policies, behind the
+  #              `enable_access_reviews` master switch. Still requires contract v2;
+  #              reviews touch nothing the vending module produces, so there is no
+  #              contract bump and repo 1 is unchanged at c5154e2b.
+  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=780d2ade8fe0b82118a772bfbd2e4760d043cd8f"
 
   # The whole taxonomy, in memory. Scope keys, role keys, group names, group
   # object IDs, access types, catalog labels, the systemeier lists and the
@@ -161,6 +162,21 @@ module "access_packages" {
   # nobody could approve without holding the access. The module now REJECTS
   # grant_approver_group rather than reinterpreting it.
   approver_packages = var.access_approver_packages
+
+  # MASTER SWITCH for recurring access reviews, driven by the workflow's
+  # `deploy_access_reviews` checkbox rather than by terraform.tfvars — same reasoning
+  # as enable_access_packages: a TF_VAR always beats a tfvars entry, so a copy there
+  # could never take effect.
+  #
+  # tfvars still owns WHAT the reviews look like, per package. This only decides
+  # whether they are emitted. With it false the module still resolves the
+  # configuration and reports it as `deployed = false`, so the intended shape is
+  # reviewable before it goes live.
+  #
+  # Turning it off again is an IN-PLACE update of the assignment policy — no
+  # assignment is dropped and nobody loses access. What is lost is the review
+  # campaign and its history, which is the audit trail.
+  enable_access_reviews = var.enable_access_reviews
 
   # NOT PASSED: manage_pim_for_groups_roles / acknowledge_m3_active_membership.
   #

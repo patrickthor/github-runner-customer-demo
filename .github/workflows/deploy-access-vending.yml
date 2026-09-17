@@ -158,6 +158,12 @@ on:
           - groups-and-pim
           - groups-pim-and-access-packages
 
+      deploy_access_reviews:
+        description: "Also deploy recurring access reviews (requires access packages)"
+        required: false
+        default: false
+        type: boolean
+
       confirm_remove_access_packages:
         description: "Required to apply a run that DELETES catalogs/access packages"
         required: false
@@ -252,6 +258,7 @@ jobs:
         id: mode
         env:
           COMPONENTS: ${{ inputs.components }}
+          REVIEWS: ${{ inputs.deploy_access_reviews }}
         run: |
           case "$COMPONENTS" in
             groups-and-pim)
@@ -265,6 +272,21 @@ jobs:
               exit 1
               ;;
           esac
+
+          # Reviews attach to an access package assignment policy, so they are
+          # meaningless without packages. Caught here rather than letting Terraform
+          # produce a confusing result: the module would simply have nothing to review.
+          if [ "$REVIEWS" = "true" ] && [ "$PACKAGES" != "true" ]; then
+            echo "::error::deploy_access_reviews requires access packages. An access review attaches to an access package assignment policy, and 'groups-and-pim' creates none. Re-run with components = groups-pim-and-access-packages, or untick deploy_access_reviews."
+            exit 1
+          fi
+
+          # Master switch for reviews. Same split as the components choice: the pipeline
+          # decides WHETHER reviews are deployed, terraform.tfvars decides WHAT they look
+          # like. A TF_VAR always beats a tfvars entry, so the switch has one home.
+          echo "TF_VAR_enable_access_reviews=$REVIEWS" >> "$GITHUB_ENV"
+          echo "reviews=$REVIEWS" >> "$GITHUB_OUTPUT"
+          echo "Access reviews: $REVIEWS"
 
           # This is the ONLY place the switch is set. terraform.tfvars deliberately
           # does not carry a copy: TF_VAR always wins, so a copy there could never
@@ -280,9 +302,19 @@ jobs:
               echo "Entra groups, Azure RBAC bindings and PIM activation policies (**gate 2**),"
               echo "plus catalogs, access packages and assignment policies (**gate 1**)."
               echo ""
-              echo "Needs \`EntitlementManagement.ReadWrite.All\` on the deploy identity, and"
-              echo "**Entra ID Governance or Entra Suite** licensing. P2 alone is not enough and"
-              echo "fails partway through the apply rather than at plan."
+              echo "Needs \`EntitlementManagement.ReadWrite.All\` on the deploy identity."
+              echo ""
+              if [ "$REVIEWS" = "true" ]; then
+                echo "Recurring **access reviews** are ON. No extra Graph permission is needed —"
+                echo "a review is a field on the assignment policy. Packages with no"
+                echo "\`access_reviews\` block in terraform.tfvars are unreviewed by design;"
+                echo "\`terraform output access_reviews\` shows which got one."
+              else
+                echo "Recurring **access reviews** are OFF. Any \`access_reviews\` configuration in"
+                echo "terraform.tfvars is resolved but not written to the policies — see"
+                echo "\`terraform output access_reviews_configured_not_deployed\`. Tick"
+                echo "\`deploy_access_reviews\` to deploy them."
+              fi
             else
               echo "Entra groups, Azure RBAC bindings and PIM activation policies (**gate 2**)"
               echo "only. No catalogs and no access packages, so nothing is requestable yet and"
@@ -426,6 +458,38 @@ jobs:
             echo "OK — no access package deletions in plan."
           fi
 
+      # ------------------------------------------------------------------------
+      # Warn — not block — when a run removes review settings.
+      #
+      # Deliberately softer than the access package deletion guard, because the
+      # consequence is smaller: azuread_access_package_assignment_policy declares
+      # ForceNew on nothing and implements Update, so removing the review block is an
+      # IN-PLACE update. No assignment is dropped and nobody loses access. What is lost
+      # is the review campaign and its history, i.e. the audit trail.
+      #
+      # Also why this greps differently from the deletion guard: there are no
+      # "will be destroyed" lines to count. A removed block shows as a `-` prefixed
+      # attribute inside a `~` resource.
+      # ------------------------------------------------------------------------
+      - name: Note access review removal
+        if: inputs.action != 'destroy'
+        run: |
+          terraform show -no-color tfplan > plan_reviews.txt
+          REMOVING=$(grep -cE '^[[:space:]]*- assignment_review_settings' plan_reviews.txt || true)
+
+          if [ "${REMOVING:-0}" -gt 0 ]; then
+            echo "::warning::This plan REMOVES access review settings from ${REMOVING} assignment policy/policies. Assignments are unaffected — this is an in-place update — but the recurring review campaign and its history go with it. If that is not intended, tick deploy_access_reviews."
+            {
+              echo "### :warning: Access reviews are being removed"
+              echo ""
+              echo "${REMOVING} assignment policy/policies lose their review block in this plan."
+              echo "Nobody loses access — this is an in-place update — but the review campaign"
+              echo "and its history are deleted. Tick \`deploy_access_reviews\` if that is wrong."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "OK — no access review settings removed in plan."
+          fi
+
       - name: Plan summary
         run: |
           {
@@ -519,6 +583,16 @@ jobs:
             echo "people's PIM activations in that scope, and grants no access itself:"
             echo '```json'
             terraform output -json approver_packages
+            echo '```'
+            echo "Access reviews per package, with resolved reviewers. \`deployed = false\`"
+            echo "means configured but not written, because the master switch is off:"
+            echo '```json'
+            terraform output -json access_reviews
+            echo '```'
+            echo "Configured but NOT deployed — should be empty once reviews are on. This is"
+            echo "the state most easily misread as \"reviews are enabled\":"
+            echo '```json'
+            terraform output -json access_reviews_configured_not_deployed
             echo '```'
             echo "Peer approval — a lone systemeier cannot approve their own activation, and"
             echo "the PIM request timeout is a fixed 24 hours:"
