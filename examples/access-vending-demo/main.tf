@@ -84,7 +84,7 @@ module "access_vending" {
   #              mechanism, and pim_group_* names the PIM-managed group the carrier
   #              confers eligibility on.
   #              Also requires azurerm >= 5.0, which is why versions.tf pins ~> 5.4.0.
-  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending?ref=c5154e2bc1ec5cb3b633f2f58be2badf61c109c0"
+  source = "github.com/patrickthor/terraform-azuread-access-vending-development//modules/access-vending"
 
   access_scopes = var.access_scopes
 
@@ -109,12 +109,17 @@ module "access_vending" {
 module "access_packages" {
   count = var.enable_access_packages ? 1 : 0
 
-  #   780d2ade — inital-commit @ 2026-09-17, "Implement access reviews in the module"
-  #              Adds recurring access reviews on the assignment policies, behind the
+  #   3aec7589 — inital-commit @ 2026-09-17, "Bugfix on access review"
+  #              Recurring access reviews on the assignment policies, behind the
   #              `enable_access_reviews` master switch. Still requires contract v2;
   #              reviews touch nothing the vending module produces, so there is no
   #              contract bump and repo 1 is unchanged at c5154e2b.
-  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages?ref=780d2ade8fe0b82118a772bfbd2e4760d043cd8f"
+  #
+  #              780d2ade — the first review commit — is UNUSABLE with any config that
+  #              mixes reviewed packages and a pim_for_groups package without a review.
+  #              It indexed review_effective with a key it did not have, guarded only by
+  #              `&&`, which Terraform does not short-circuit. Do not pin it.
+  source = "github.com/patrickthor/terraform-azuread-access-packages-development//modules/access-packages"
 
   # The whole taxonomy, in memory. Scope keys, role keys, group names, group
   # object IDs, access types, catalog labels, the systemeier lists and the
