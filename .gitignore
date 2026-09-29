@@ -12,10 +12,8 @@
 #
 # The decision: provider versions are controlled by required_providers in each
 # example's versions.tf, pinned to patch level (`~> X.Y.0`), and nowhere else.
-# That keeps one source of truth rather than two that can disagree, which is what
-# was happening — deploy-runners.yml and demo-storage.yml pass `terraform init
-# -upgrade`, which discards the locked version and re-resolves anyway, so the
-# committed lockfiles were already decorative for those two.
+# Workflows intentionally run plain `terraform init`; without a committed lockfile,
+# a clean runner resolves the newest patch allowed by the root constraint.
 #
 # WHAT THIS COSTS, so nobody has to rediscover it:
 #   * No checksum verification of the provider binary. The lockfile's zh:/h1:

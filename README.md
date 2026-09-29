@@ -80,7 +80,6 @@ Create the service principal with OIDC trust — see [Deploying identity permiss
 | `AZURE_LOCATION` | `westeurope` | Azure region |
 | `GH_ORG` | `your-org` | GitHub organization |
 | `GH_REPO` | `your-org/your-repo` | Repository in org/repo format |
-| `RUNNER_MODULE_REF` | `v3.0.0` | Module version tag (optional, defaults to v3.0.0) |
 | `RUNNER_WORKLOAD_ROLES` | `Contributor` | Comma-separated Azure roles for runner identity (optional) |
 | `STATE_RESOURCE_GROUP` | `rg-tfstate` | Resource group for state storage (created automatically if missing) |
 | `STATE_STORAGE_ACCOUNT` | `sttfstate1a2b` | Storage account name for Terraform state (created automatically if missing) |
@@ -204,4 +203,6 @@ If the job stays queued, work through it in this order:
 
 **`AADSTS700024` in the deploy workflow.** The federated credential `subject` doesn't match the repo and branch actually running the workflow. It must be exact — `repo:<org>/<repo>:ref:refs/heads/main`.
 
-**Module version.** `examples/runner-demo/main.tf` currently pins `?ref=main`, which is not a stable interface — the module repo can change it under you. Pin a release tag instead (`v3.0.8` is current). Note the `RUNNER_MODULE_REF` variable above only controls which tag the *scaler function code* is fetched from; the Terraform module version is the `source` line in `main.tf`, and the two should agree.
+**Runner source version.** Terraform infrastructure and scaler Function code are both pinned to immutable commit `916e8d08874cc1df596a5fd391228d56cba865f1`. The workflow verifies that its `MODULE_REF` matches the `?ref=` in `examples/runner-demo/main.tf` before Azure login. There is no repository-variable override because that could silently deploy infrastructure and code from different revisions. Replace both pins with the same release tag when the runner module publishes a release that raises its AzureRM floor to 5.6.0 or newer.
+
+**Service Bus namespace stuck in `Failed`.** The runner root uses AzureRM `~> 5.7.0`; AzureRM 5.6.0 moved Service Bus to control-plane API `2026-01-01`. Keep the module's Basic SKU, TLS 1.2, and disabled local authentication. Do not add `zone_redundant` or change to Premium: Azure automatically enables zone redundancy for every tier in supported regions. The provider upgrade prevents the known 5.4.x API boundary from being reused, but only a clean namespace deployment can confirm the diagnosis. A namespace already in `Failed` with `CreateNamespacePayloadDiffersFromExistingNamespaceInFailedState` must be explicitly deleted after approval and shown absent before applying again; retries cannot repair it.
