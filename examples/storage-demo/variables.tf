@@ -19,7 +19,7 @@ variable "location" {
 variable "storage_account_name_prefix" {
   description = "Prefix for the storage account name. A random suffix is appended for global uniqueness"
   type        = string
-  default     = "runnerdemo"
+  default     = "azlh-artifacts"
 
   validation {
     condition     = can(regex("^[a-z0-9]{3,16}$", var.storage_account_name_prefix))
