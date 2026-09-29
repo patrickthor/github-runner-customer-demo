@@ -1,0 +1,59 @@
+diff --git a/modules/access-packages/locals.tf b/modules/access-packages/locals.tf
+index 437760e..6841fb4 100644
+--- a/modules/access-packages/locals.tf
++++ b/modules/access-packages/locals.tf
+@@ -634,21 +634,45 @@ locals {
+   # Two distinct failures, because the fix is in a different place for each.
+   # ----------------------------------------------------------------------------
+ 
+-  # Packages where the review interval is at least the assignment duration. The general case.
+-  reviews_outlasting_assignment = [
++  # Reviewed packages whose frequency is a KNOWN value, split out so the interval lookup
++  # below cannot miss.
++  #
++  # Guarding inline as `contains(valid, freq) && ... review_interval_days[freq]` reads like
++  # a guard and is not one: Terraform does not guarantee that `&&` short-circuits, so the
++  # index is still evaluated and an unknown frequency dies with "Invalid index". Same rule
++  # as the null guards elsewhere in this file — filter in the `for` clause, because then the
++  # value never reaches the index at all.
++  reviewed_packages_known_freq = [
+     for name in local.packages_with_review_config : name
+     if contains(local.review_valid_frequencies, local.review_effective[name].review_frequency)
+-    && local.effective[name].assignment_duration_days <= local.review_interval_days[local.review_effective[name].review_frequency]
++  ]
++
++  # Packages where the review interval is at least the assignment duration. The general case.
++  reviews_outlasting_assignment = [
++    for name in local.reviewed_packages_known_freq : name
++    if local.effective[name].assignment_duration_days <= local.review_interval_days[local.review_effective[name].review_frequency]
+   ]
+ 
+   # The cross-repo case: the assignment duration is CAPPED below the review interval by a role's
+-  # PIM policy in the vending repo, so the two constraints cannot both be satisfied here. Keyed
+-  # only on packages that have a ceiling, so no null reaches the comparison.
+-  reviews_unsatisfiable_by_ceiling = [
++  # PIM policy in the vending repo, so the two constraints cannot both be satisfied here.
++  #
++  # THIS IS WHERE THE BUG WAS. ceiling_by_package is keyed on every package WITH A CEILING,
++  # which is NOT the same set as the reviewed packages: a pim_for_groups package with no
++  # review has a ceiling and no review_effective entry. The old code iterated
++  # ceiling_by_package and guarded with `contains(packages_with_review_config, name) && ...
++  # review_effective[name]`, so on any Terraform that does not short-circuit `&&` it indexed
++  # review_effective with a key it does not have — "Invalid index", reported against a
++  # configuration that is perfectly valid.
++  #
++  # Two filters, two steps, no `&&`.
++  reviewed_packages_with_ceiling = [
+     for name, ceiling in local.ceiling_by_package : name
+-    if contains(local.packages_with_review_config, name)
+-    && contains(local.review_valid_frequencies, local.review_effective[name].review_frequency)
+-    && ceiling <= local.review_interval_days[local.review_effective[name].review_frequency]
++    if contains(local.reviewed_packages_known_freq, name)
++  ]
++
++  reviews_unsatisfiable_by_ceiling = [
++    for name in local.reviewed_packages_with_ceiling : name
++    if local.ceiling_by_package[name] <= local.review_interval_days[local.review_effective[name].review_frequency]
+   ]
+ 
+   # The general failure minus the cross-repo one, so each is reported once with the right fix.

@@ -1,23 +1,21 @@
-# Basic Example — Consuming the Runners Module
+# GitHub Runners and Identity Governance Demo
 
-This example shows the minimum setup needed to deploy the GitHub runners platform in your own project. All configuration is driven by GitHub repository secrets and variables — no hardcoded values in the Terraform files.
+This repository demonstrates the GitHub runners platform, a two-module Entra identity-governance chain, and provider-side generation of customer-specific Azure Lighthouse ARM artifacts.
 
 ## Files
 
 ```
 ├── examples/
 │   ├── runner-demo/                         # Runner platform module usage
-│   │   ├── main.tf                          # Module call (reads from variables)
-│   │   ├── variables.tf                     # Variable declarations
-│   │   └── versions.tf                      # Provider and backend configuration
-│   ├── storage-demo/                        # Self-hosted runner test (storage account)
-│   └── access-vending-demo/                 # Identity governance: groups + RBAC + PIM,
-│                                            #   optionally catalogs + access packages
-├── docs/steering/                           # Steering docs to paste into the two module repos
+│   ├── storage-demo/                        # Self-hosted runner test
+│   ├── access-vending-demo/                 # Entra groups + PIM + access packages
+│   └── lighthouse-arm-demo/                 # Parameter-free Lighthouse ARM rendering
+├── docs/steering/                           # Module implementation guidance
 └── .github/workflows/
-    ├── deploy-runners.yml                   # Runner platform (generates tfvars from GitHub variables)
-    ├── demo-storage.yml                     # storage-demo, on self-hosted runners
-    └── deploy-access-vending.yml            # access-vending-demo, on self-hosted runners
+    ├── deploy-runners.yml                   # Runner platform
+    ├── demo-storage.yml                     # Self-hosted storage test
+    ├── deploy-access-vending.yml            # Identity governance
+    └── publish-lighthouse-arm.yml            # Immutable Lighthouse ARM artifacts
 ```
 
 ## Examples
@@ -26,9 +24,10 @@ This example shows the minimum setup needed to deploy the GitHub runners platfor
 |---|---|---|---|---|
 | `runner-demo` | `deploy-runners.yml` | `ubuntu-latest` | OIDC | Deploys the runner platform itself |
 | `storage-demo` | `demo-storage.yml` | self-hosted ACI | runner MI | Proves the runners can create infrastructure |
-| `access-vending-demo` | `deploy-access-vending.yml` (*Deploy Identity Governance*) | self-hosted ACI | OIDC | Entra groups, RBAC bindings and PIM policies — plus catalogs and access packages when enabled |
+| `access-vending-demo` | `deploy-access-vending.yml` | self-hosted ACI | OIDC | Entra groups, RBAC/PIM, and optional access packages/reviews |
+| `lighthouse-arm-demo` | `publish-lighthouse-arm.yml` | self-hosted ACI | OIDC | Renders and immutably publishes parameter-free Lighthouse ARM JSON |
 
-All three take the same `plan` / `apply` / `destroy` choice on manual dispatch, default `plan`, and all three keep Terraform state on the shared state storage account.
+The Lighthouse publisher is intentionally separate from the access-vending state. It accepts customer-specific managing-tenant principal UUIDs once in its committed `terraform.tfvars`, fixes the Lighthouse module to ARM mode, and uploads versioned JSON to a private Blob container. It never authenticates to or changes a customer subscription. Terraform-capable customers consume the same [Lighthouse module](https://github.com/patrickthor/JSONARM-lighthouse-manifesto) in native `terraform` mode from their own customer-side repository and state. One delegation must use only one ownership path.
 
 `access-vending-demo` calls **two** modules against **one** state, so its workflow takes a second choice — `components` — for what to deploy:
 
@@ -45,9 +44,9 @@ A third input, **`deploy_access_reviews`**, is a checkbox rather than a dropdown
 
 `storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
 
-**Order matters:** run `deploy-runners.yml` with `apply` first. It creates the state account, the state container `storage-demo` uses, and the role assignment granting the runner identity access to it.
+**Order matters:** run `deploy-runners.yml` with `apply` first. It creates the shared storage account and state containers. The Lighthouse publishing workflow creates its own private artifact container on first publish; it refuses to reuse either Terraform-state container.
 
-> `access-vending-demo` authenticates with its own dedicated OIDC identity (`AZURE_VENDING_CLIENT_ID`), not the shared runner managed identity, and needs Graph plus RBAC permissions granted to it before the first run — see [its README](examples/access-vending-demo/README.md#the-vending-identity).
+> `access-vending-demo` and the Lighthouse publisher prefer the optional dedicated OIDC identity in `AZURE_VENDING_CLIENT_ID`, and otherwise reuse `AZURE_CLIENT_ID`. The selected identity needs the permissions documented by each example.
 
 ## Quick start
 
@@ -87,6 +86,7 @@ Create the service principal with OIDC trust — see [Deploying identity permiss
 | `STATE_STORAGE_ACCOUNT` | `sttfstate1a2b` | Storage account name for Terraform state (created automatically if missing) |
 | `STATE_CONTAINER` | `tfstate` | Blob container for the platform and access-vending state (optional, defaults to tfstate) |
 | `RUNNER_STATE_CONTAINER` | `runner-jobs-tfstate` | Blob container for state written *by jobs on the runners* (optional). Kept separate so the shared runner identity cannot read the other state files |
+| `LIGHTHOUSE_ARTIFACT_CONTAINER` | `lighthouse-artifacts` | Private container for immutable customer ARM JSON (optional). Must differ from both state containers |
 
 ### 4. Run the deploy workflow
 

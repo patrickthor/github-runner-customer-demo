@@ -1,0 +1,218 @@
+name: Publish Lighthouse ARM Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Validate only, or publish immutable ARM artifacts"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - publish
+      artifact_version:
+        description: "Immutable version (blank uses the full Git commit SHA)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lighthouse-arm-publisher-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Lighthouse ARM (${{ inputs.action }})
+    runs-on:
+      - self-hosted
+      - azure
+      - container-instance
+
+    defaults:
+      run:
+        working-directory: examples/lighthouse-arm-demo
+
+    env:
+      ARM_USE_OIDC: true
+      ARM_USE_MSI: false
+      ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_managing_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_artifact_storage_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Authenticate module downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global \
+            url."https://oauth2:${GH_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Resolve immutable artifact version
+        env:
+          REQUESTED_VERSION: ${{ inputs.artifact_version }}
+        run: |
+          VERSION="${REQUESTED_VERSION:-$GITHUB_SHA}"
+          if ! [[ "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::artifact_version must start with an alphanumeric character and contain only letters, numbers, dots, underscores, or hyphens."
+            exit 1
+          fi
+          echo "TF_VAR_artifact_version=$VERSION" >> "$GITHUB_ENV"
+          echo "LIGHTHOUSE_ARTIFACT_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Check governance record
+        run: |
+          if [ ! -f terraform.tfvars ]; then
+            echo "::error::terraform.tfvars is missing. It is the committed Lighthouse governance record."
+            exit 1
+          fi
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: |
+          # The ARM templates are identifiers and policy rather than credentials,
+          # but they are customer artifacts, not useful workflow-log content.
+          if ! terraform plan -input=false -out=tfplan > plan.log 2>&1; then
+            cat plan.log
+            exit 1
+          fi
+          echo "Terraform plan completed; rendered templates were not printed."
+
+      - name: Plan summary
+        run: |
+          COUNT=$(terraform show -json tfplan | jq -r '.planned_values.outputs.customer_count.value // 0')
+          {
+            echo "### Lighthouse ARM artifact plan"
+            echo ""
+            echo "Customer templates: **$COUNT**"
+            echo "Artifact version: \`$LIGHTHOUSE_ARTIFACT_VERSION\`"
+            echo ""
+            echo "This root is fixed to ARM rendering and plans no customer Lighthouse resources."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Materialize deterministic outputs
+        if: inputs.action == 'publish'
+        run: |
+          if ! terraform apply -auto-approve -input=false tfplan > apply.log 2>&1; then
+            cat apply.log
+            exit 1
+          fi
+          echo "Terraform outputs materialized; rendered templates were not printed."
+
+      - name: Publish immutable templates
+        if: inputs.action == 'publish'
+        env:
+          STORAGE_ACCOUNT: ${{ vars.STATE_STORAGE_ACCOUNT }}
+          ARTIFACT_CONTAINER: ${{ vars.LIGHTHOUSE_ARTIFACT_CONTAINER || 'lighthouse-artifacts' }}
+          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
+          RUNNER_STATE_CONTAINER: ${{ vars.RUNNER_STATE_CONTAINER || 'runner-jobs-tfstate' }}
+        run: |
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::error::STATE_STORAGE_ACCOUNT must identify the remote artifact storage account."
+            exit 1
+          fi
+          if [ "$ARTIFACT_CONTAINER" = "$STATE_CONTAINER" ] || [ "$ARTIFACT_CONTAINER" = "$RUNNER_STATE_CONTAINER" ]; then
+            echo "::error::LIGHTHOUSE_ARTIFACT_CONTAINER must be separate from both Terraform state containers."
+            exit 1
+          fi
+
+          az storage container create \
+            --name "$ARTIFACT_CONTAINER" \
+            --account-name "$STORAGE_ACCOUNT" \
+            --auth-mode login \
+            --public-access off \
+            --output none
+
+          OUTPUT_DIR="$RUNNER_TEMP/lighthouse-arm"
+          mkdir -p "$OUTPUT_DIR"
+          terraform output -json arm_template_json > "$OUTPUT_DIR/templates.json"
+          terraform output -json arm_template_sha256 > "$OUTPUT_DIR/checksums.json"
+          CUSTOMER_COUNT=$(jq 'length' "$OUTPUT_DIR/templates.json")
+
+          if [ "$CUSTOMER_COUNT" -eq 0 ]; then
+            echo "::warning::customers is empty; no Lighthouse artifacts were published."
+            echo "No artifacts published because \`customers = {}\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          while IFS= read -r CUSTOMER; do
+            FILE="$OUTPUT_DIR/${CUSTOMER}-lighthouse.json"
+            jq -jr --arg customer "$CUSTOMER" '.[$customer]' "$OUTPUT_DIR/templates.json" > "$FILE"
+            EXPECTED_SHA=$(jq -r --arg customer "$CUSTOMER" '.[$customer]' "$OUTPUT_DIR/checksums.json")
+            ACTUAL_SHA=$(sha256sum "$FILE" | cut -d ' ' -f 1)
+
+            if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+              echo "::error::Checksum mismatch while materializing $CUSTOMER."
+              exit 1
+            fi
+
+            BLOB_NAME="$CUSTOMER/$LIGHTHOUSE_ARTIFACT_VERSION/lighthouse.json"
+            EXISTING_SHA=$(az storage blob show \
+              --account-name "$STORAGE_ACCOUNT" \
+              --container-name "$ARTIFACT_CONTAINER" \
+              --name "$BLOB_NAME" \
+              --auth-mode login \
+              --query 'metadata.sha256' \
+              --output tsv 2>/dev/null || true)
+
+            if [ -n "$EXISTING_SHA" ]; then
+              if [ "$EXISTING_SHA" != "$EXPECTED_SHA" ]; then
+                echo "::error::Immutable artifact $BLOB_NAME already exists with a different checksum. Choose a new artifact version."
+                exit 1
+              fi
+              echo "Artifact already exists with the expected checksum: $BLOB_NAME"
+            else
+              az storage blob upload \
+                --account-name "$STORAGE_ACCOUNT" \
+                --container-name "$ARTIFACT_CONTAINER" \
+                --name "$BLOB_NAME" \
+                --file "$FILE" \
+                --content-type "application/json" \
+                --metadata "sha256=$EXPECTED_SHA" "gitcommit=$GITHUB_SHA" \
+                --overwrite false \
+                --auth-mode login \
+                --output none
+              echo "Published $BLOB_NAME"
+            fi
+
+            {
+              echo "- \`$BLOB_NAME\`"
+              echo "  - SHA-256: \`$EXPECTED_SHA\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done < <(jq -r 'keys[]' "$OUTPUT_DIR/templates.json")
+
+      - name: Remove git credentials
+        if: always()
+        run: |
+          git config --global --unset-all \
+            url."https://oauth2:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf || true

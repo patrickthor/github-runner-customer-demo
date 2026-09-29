@@ -1,0 +1,306 @@
+IMPLEMENTATION BRIEF: AZURE LIGHTHOUSE TERRAFORM MODULE + PORTAL ARM ARTIFACT
+
+Purpose
+=======
+Implement the foundation for Azure Lighthouse delegation in this repository. The same customer-specific delegation data must support two mutually exclusive delivery paths:
+
+1. Native Terraform deployment in the customer subscription.
+2. Generation of one self-contained ARM JSON file that a customer can download and upload to Azure Portal Custom Deployment / Service providers > Add offer via template.
+
+The consuming repository owns all customer-specific configuration and identifiers. This module owns the schema, validation, transformation, native Lighthouse resources, and ARM rendering. Minimize duplicate data: normalize the consumer input once and derive both representations from that normalized model.
+
+Before changing code
+====================
+1. Inspect the repository structure, existing variables, versions, README, examples, formatting conventions, and CI checks.
+2. Retrieve the exact documentation for the AzureRM provider version used by this repository, especially azurerm_lighthouse_definition and azurerm_lighthouse_assignment. Do not infer provider block names from the ARM schema.
+3. Preserve existing public behavior unless it conflicts with this brief. If the repository already has an input contract, adapt it rather than creating a second competing interface.
+4. Use the repository's existing Terraform/provider version policy. If this is a new repository with no policy yet, target Terraform >= 1.9 and AzureRM ~> 5.4.0 or the current approved AzureRM 5.x patch line.
+
+System and trust boundaries
+===========================
+The managing/provider Entra tenant contains the consultants, security groups, access packages, approver groups, and Conditional Access policies. The customer tenant owns the Azure subscription being delegated.
+
+This module must not:
+- Create Entra groups, users, access packages, access reviews, or Conditional Access policies.
+- Require the azuread provider.
+- Create direct customer RBAC assignments outside Azure Lighthouse.
+- Configure separate PIM-for-Groups policies for Lighthouse roles.
+- Assume that customer-tenant Conditional Access controls the provider users.
+- Add unsupported justification, ticket, or authentication-context fields to Lighthouse eligible authorizations.
+- Upload artifacts to a hard-coded storage account.
+
+The consuming repository supplies customer/provider-specific values such as:
+- Managing tenant UUID.
+- Customer subscription scope for native Terraform deployment.
+- Lighthouse principal/group object UUIDs and display names.
+- Approver object UUIDs and display names.
+- Offer name and description.
+- Permanent and eligible role choices.
+- JIT duration and MFA/approval settings.
+- Artifact version and remote storage destination outside this core module.
+
+Public module behavior
+======================
+Expose a mode with exactly two values. Use names consistent with the existing repository, but the behavior must be equivalent to:
+
+- "terraform": create the Lighthouse definition and assignment in the customer subscription.
+- "arm": create no Lighthouse resources and return a self-contained ARM template JSON string.
+
+Do not create a third mode that deploys both paths. The same delegation must never be managed simultaneously by native Terraform and manual ARM deployment.
+
+ARM JSON generation itself is not a deployment. It is acceptable to calculate and expose the ARM JSON in both modes for inspection, but only "terraform" may create Lighthouse resources. Clearly document that the generated file must not be deployed when the same delegation is already managed by Terraform.
+
+Suggested consumer contract
+===========================
+Use one strongly typed object rather than parallel lists or multiple maps whose keys must be kept aligned. Adapt names to repository conventions if necessary. A suitable conceptual contract is:
+
+variable "deployment_mode" {
+  type = string
+  # terraform | arm
+}
+
+variable "scope" {
+  type     = string
+  default  = null
+  nullable = true
+  # Required only for native Terraform deployment.
+  # Initial implementation should support subscription scope only.
+}
+
+variable "delegation" {
+  type = object({
+    offer_name          = string
+    offer_description   = optional(string, "")
+    managing_tenant_id  = string
+
+    principals = map(object({
+      principal_id      = string
+      principal_name    = string
+
+      permanent_roles   = optional(set(string), [])
+
+      eligible_roles = optional(map(object({
+        maximum_activation_duration = string
+        require_mfa                  = optional(bool, true)
+        approvers = optional(list(object({
+          principal_id   = string
+          principal_name = string
+        })), [])
+      })), {})
+    }))
+  })
+}
+
+The map keys are stable Terraform identity keys only; Azure object UUIDs remain values. Do not use unknown resource attributes as for_each keys.
+
+Role handling
+=============
+Consumers should normally choose supported built-in roles by stable module-defined names, for example Reader and Contributor. Keep the role-name-to-built-in-role-UUID map in one module local so consumers do not repeatedly copy role UUIDs and so both renderers use exactly the same UUID.
+
+Start with the small allowlist needed by the demonstrated model:
+- Reader: acdd72a7-3385-48ef-bd42-f606fba81ae7
+- Contributor: b24988ac-6180-42a0-ab88-20f7382dd24c
+- Managed Services Registration Assignment Delete Role: 91c1777a-f3dc-4fae-b103-61d183457e46, if exposed by the chosen model
+
+Do not silently accept arbitrary custom roles. Azure Lighthouse has role restrictions, including unsupported Owner roles and roles with DataActions. Expanding the allowlist must be an intentional module change backed by current Lighthouse role-support documentation.
+
+Canonical normalized model
+==========================
+Create one local normalized model that expands each principal into:
+
+- A deterministic collection of permanent authorizations.
+- A deterministic collection of eligible authorizations.
+- Normalized role UUIDs.
+- Normalized MFA provider value.
+- Normalized approver objects.
+- Stable keys such as "<principal-key>/<role-name>".
+
+Both the AzureRM resources and the ARM object must consume this model. Do not independently reimplement filtering, defaults, role lookup, or approver transformation in the two paths.
+
+All ARM-rendering values must derive from input values and locals, not from created Lighthouse resource attributes. ARM generation must therefore work with deployment_mode = "arm" without authenticating to the customer subscription.
+
+Native Terraform implementation
+===============================
+In "terraform" mode:
+
+1. Require a subscription resource ID scope in the form /subscriptions/<uuid>.
+2. Create one azurerm_lighthouse_definition with the managing tenant, offer metadata, permanent authorizations, and eligible authorizations from the normalized model.
+3. Create one azurerm_lighthouse_assignment at the same subscription scope and point it to the definition.
+4. Use conditional for_each/count so neither resource exists in "arm" mode.
+5. Use deterministic definition and assignment names. Avoid random_uuid and timestamp-based names. Prefer UUIDv5 values derived from stable inputs such as managing tenant ID, offer name, and separate definition/assignment suffixes. Use the same calculated names in the ARM renderer.
+6. Expose the native definition and assignment IDs as nullable outputs.
+
+Verify the exact AzureRM 5.x nested-block names and constraints before implementing. The AzureRM provider model and ARM property names are not interchangeable.
+
+Self-contained ARM implementation
+=================================
+In "arm" mode, generate one valid subscription-scope ARM template using a Terraform object and jsonencode. Do not attempt to transpile AzureRM resource blocks; Terraform has no supported AzureRM-to-ARM compiler.
+
+The output must be a complete template that can be saved as one .json file and uploaded without a separate parameter file. Embed the following generated values directly in the resource properties:
+
+- Offer name and description.
+- Managing tenant UUID.
+- Permanent authorizations.
+- Eligible authorizations.
+- JIT policy settings.
+- Approver UUIDs and display names.
+- Deterministic definition and assignment names.
+
+The customer selects the target subscription when starting the Azure Portal deployment, so the generated template does not need a customer subscription UUID embedded in it.
+
+The ARM template must:
+- Use the subscription deployment schema.
+- Contain Microsoft.ManagedServices/registrationDefinitions.
+- Contain Microsoft.ManagedServices/registrationAssignments.
+- Make the assignment depend on the definition.
+- Point registrationDefinitionId at the definition in the same template.
+- Use a currently supported Microsoft.ManagedServices API version that supports eligibleAuthorizations. Verify this before implementation; current Microsoft examples include 2022-10-01 for registration resources, while older eligible-authorization samples use 2020-02-01-preview.
+- Produce valid JSON through jsonencode, not string concatenation.
+- Contain no secrets, credentials, SAS tokens, or storage account keys.
+- Require no user-supplied template parameters for the customer-specific authorization model.
+
+Map eligible settings as follows:
+- require_mfa = true -> multiFactorAuthProvider = "Azure".
+- require_mfa = false -> multiFactorAuthProvider = "None".
+- maximum_activation_duration -> maximumActivationDuration.
+- A non-empty approver list -> managedByTenantApprovers.
+- An empty approver list -> omit managedByTenantApprovers rather than emitting null.
+
+Outputs
+=======
+At minimum expose:
+
+- arm_template_json: the jsonencode result.
+- arm_template_sha256: sha256 of exactly arm_template_json.
+- suggested_artifact_name: a safe deterministic filename containing a sanitized customer/offer identifier and a consumer-provided artifact version, if artifact versioning is included in the public contract.
+- normalized_delegation: a non-sensitive diagnostic output if it does not expose anything beyond the input/derived role IDs.
+- lighthouse_definition_id: native mode only, otherwise null.
+- lighthouse_assignment_id: native mode only, otherwise null.
+
+Mark outputs sensitive only if they actually contain sensitive values. Tenant IDs, group object IDs, role IDs, and the ARM template are identifiers but are not credentials; unnecessary sensitive marking makes controlled artifact publication harder.
+
+Remote artifact publishing boundary
+===================================
+The core module must generate the JSON but must not own a storage account or contain environment-specific storage names. Remote publication belongs to the consuming root/pipeline.
+
+Provide a concise example showing how a consumer can upload arm_template_json to a private Azure Blob container with azurerm_storage_blob source_content. The consumer supplies:
+
+- Artifact storage subscription/provider configuration.
+- Existing storage account name.
+- Existing private container name.
+- Customer-safe path.
+- Immutable artifact version.
+
+Recommended blob layout:
+
+lighthouse-artifacts/<customer-key>/<artifact-version>/lighthouse.json
+
+The example must:
+- Use a dedicated artifact container, never the Terraform-state container.
+- Set content type to application/json.
+- Use an immutable versioned blob name rather than only latest/lighthouse.json.
+- Avoid creating or outputting SAS tokens.
+- Show an aliased azurerm provider if artifact storage is in a different subscription from native customer deployment.
+
+The module may output the checksum and suggested path, but access grants, SAS issuance, retention policy, blob versioning, and customer delivery are consuming-repository/platform responsibilities.
+
+Required validations and guardrails
+===================================
+Implement clear plan-time validations or preconditions for all rules that Terraform can know:
+
+1. deployment_mode is exactly "terraform" or "arm".
+2. scope is required and is a subscription resource ID in "terraform" mode.
+3. At least one authorization exists.
+4. Managing tenant, principal, and approver IDs are valid UUID-shaped strings.
+5. Principal names and offer name are non-empty.
+6. Every requested role exists in the module allowlist.
+7. Each eligible principal also has an explicit permanent Reader authorization. For the initial implementation, require Reader exactly rather than attempting to infer all roles that include read access.
+8. Eligible activation duration is between PT30M and PT8H. Prefer an explicit allowlist of half-hour increments if robust ISO-8601 parsing would make the validation unclear.
+9. No eligible authorization has more than 10 approvers.
+10. Approver IDs and names are non-empty when supplied.
+11. A principal cannot approve its own elevation if the same principal ID appears as both eligible principal and sole/one of the approvers; reject self-approval combinations rather than relying on runtime failure.
+12. If the same eligible built-in role appears more than once, all instances use identical JIT policy settings, as required by Lighthouse.
+13. No duplicate permanent principal/role pair or eligible principal/role pair survives normalization.
+14. Permanent and eligible authorizations must not accidentally collide under the same stable Terraform key.
+
+Lighthouse constraints to document
+==================================
+Document the following behavior in the README:
+
+- Eligible Lighthouse authorizations support MFA, activation duration, and optional managing-tenant approvers.
+- Activation duration is 30 minutes through 8 hours.
+- Eligible service principals are unsupported.
+- Every eligible principal needs a separate permanent Reader authorization to elevate through the portal.
+- Eligible authorizations use PIM licensing in the managing tenant.
+- Customer Conditional Access does not govern provider-tenant consultants; managing-tenant Conditional Access applies.
+- Justification, ticket information, and Conditional Access authentication context are not configurable through the Lighthouse eligible-authorization schema.
+- Customers deploy the generated JSON with an identity that can read/write/delete role assignments at the delegated scope, typically Owner.
+- Each customer subscription needs its own deployment.
+- Authorization changes require redeployment by the customer for the manual ARM path.
+- Removing a consultant from the provider security group removes the consultant's effective permanent Reader access and eligible Contributor access without customer redeployment, although propagation is not necessarily immediate.
+- Customer Activity Log entries identify the individual consultant performing actions.
+- Native Terraform and manual ARM must not manage the same delegation concurrently.
+
+Examples and documentation
+==========================
+Provide two minimal, dummy-data examples:
+
+1. examples/native-terraform
+   - Consumer supplies a subscription scope, managing tenant UUID, one security-group UUID, permanent Reader, eligible Contributor, PT2H duration, MFA, and one approver-group UUID.
+   - Uses deployment_mode = "terraform".
+
+2. examples/arm-artifact
+   - Supplies the same logical authorization model.
+   - Uses deployment_mode = "arm".
+   - Demonstrates writing/uploading arm_template_json to an existing private Blob container from the consuming root.
+   - Explains how the customer downloads the JSON and uploads it through Azure Portal Custom Deployment or Service providers > Add offer via template.
+
+Do not put real tenant, subscription, group, customer, or storage identifiers in examples. Use clearly fake UUIDs and names.
+
+Acceptance criteria
+===================
+The work is complete when all of the following are true:
+
+- One consumer input model drives both native resources and ARM rendering.
+- deployment_mode = "arm" plans zero Lighthouse definition/assignment resources.
+- deployment_mode = "terraform" plans exactly one definition and one assignment.
+- The ARM output parses as JSON.
+- The ARM output is a single self-contained subscription-scope deployment template with both required Microsoft.ManagedServices resources and no separate parameter file.
+- The permanent and eligible authorization projections in the native Terraform configuration and generated ARM JSON are semantically identical.
+- Reader + eligible Contributor + MFA + PT2H + approver is represented correctly in both paths.
+- Invalid modes, malformed UUIDs, missing permanent Reader, unsupported roles, durations outside 30 minutes to 8 hours, too many approvers, self-approval, and inconsistent policies for the same eligible role fail with useful messages.
+- The artifact example uploads to a versioned path in an existing private container and does not use the Terraform-state container.
+- No azuread resources or direct RBAC role assignments are introduced.
+- README clearly separates managing-tenant preparation, native customer deployment, ARM generation/publication, customer portal deployment, updates, and removal.
+- terraform fmt -check, terraform init -backend=false, and terraform validate succeed for the module and examples using the repository's supported Terraform version.
+
+Implementation sequencing
+=========================
+Implement in this order:
+
+1. Inspect and preserve repository conventions.
+2. Define the public contract and validations.
+3. Build the normalized local model and role map.
+4. Implement native AzureRM resources from that model.
+5. Implement the self-contained ARM object from the same model.
+6. Add outputs and checksum.
+7. Add native and ARM-publication examples.
+8. Update README with architecture, trust boundary, deployment instructions, limitations, update/removal behavior, and warning against dual ownership.
+9. Run formatting, init without backend, and validation for every module/example. Fix all failures before reporting completion.
+
+Do not deploy to a real tenant or subscription and do not create real remote storage as part of implementation. Return the changed files, validation commands/results, exact public interface, and any assumptions that still require a live Lighthouse spike.
+
+Authoritative references
+========================
+- Customer onboarding and portal template deployment:
+  https://learn.microsoft.com/azure/lighthouse/how-to/onboard-customer
+- Eligible authorization rules and ARM shape:
+  https://learn.microsoft.com/azure/lighthouse/how-to/create-eligible-authorizations
+- Microsoft.ManagedServices registration definition resource reference:
+  https://learn.microsoft.com/azure/templates/microsoft.managedservices/registrationdefinitions
+- Azure Lighthouse samples:
+  https://learn.microsoft.com/azure/lighthouse/samples/
+- Terraform jsonencode:
+  https://developer.hashicorp.com/terraform/language/functions/jsonencode
+
+The Microsoft documentation above has been summarized and rephrased rather than reproduced.
