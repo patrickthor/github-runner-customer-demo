@@ -40,6 +40,9 @@ crash.*.log
 # Sensitive / environment-specific Terraform config (use *.example counterparts)
 backend.hcl
 
+# GitHub App and other private signing keys must never enter source control.
+*.pem
+
 # NOTE: terraform.tfvars is deliberately NOT ignored.
 #
 # examples/access-vending-demo/terraform.tfvars must be committed — for an
