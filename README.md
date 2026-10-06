@@ -10,7 +10,6 @@ This repository demonstrates the GitHub runners platform, a two-module Entra ide
 │   ├── storage-demo/                        # Self-hosted runner test
 │   ├── access-vending-demo/                 # Entra groups + PIM + access packages
 │   └── lighthouse-arm-demo/                 # Parameter-free Lighthouse ARM rendering
-├── runner-image/                            # Pinned self-hosted image + Azure CLI
 ├── docs/steering/                           # Module implementation guidance
 └── .github/workflows/
     ├── deploy-runners.yml                   # Runner platform
@@ -158,10 +157,10 @@ The workflow is fully self-service. On the first run it will:
 - Grant the CI identity `Storage Blob Data Contributor` on the storage account
 - Generate `terraform.tfvars` and `backend.hcl` from your GitHub variables
 - Run `terraform apply` (infrastructure)
-- Build the repository-owned runner image in ACR from `runner-image/Dockerfile`
-- Deploy the scaler function code (fetched from the module repo)
+- Build the module-owned runner image from `github-runners@main` into the private ACR
+- Deploy the scaler function code from that same module revision
 
-The runner Dockerfile pins the upstream Linux/amd64 image digest and adds a pinned Azure CLI package from Microsoft’s signed apt repository. This keeps Azure workloads on the ephemeral self-hosted ACI runners without downloading privileged tooling during each job. After changing the Dockerfile or rebuilding the runner platform, run `deploy-runners.yml` with `apply` before starting workflows that require `az`.
+The runner Dockerfile and Azure CLI version now live in `github-runners`, making the module repository the implementation source of truth. This demo deliberately follows `main` for rapid full-environment iteration; the workflow fetches the Terraform module, scaler Function, and `runner-image/` from that same ref. Production consumers should pin a tested release.
 
 Subsequent runs skip the storage creation and just connect to the existing state.
 
@@ -311,6 +310,6 @@ If the job stays queued, work through it in this order:
 
 **`AADSTS700024` in the deploy workflow.** The federated credential `subject` doesn't match the repo and branch actually running the workflow. It must be exact — `repo:<org>/<repo>:ref:refs/heads/main`.
 
-**Runner source version.** Terraform infrastructure and scaler Function code are both pinned to immutable commit `916e8d08874cc1df596a5fd391228d56cba865f1`. The workflow verifies that its `MODULE_REF` matches the `?ref=` in `examples/runner-demo/main.tf` before Azure login. There is no repository-variable override because that could silently deploy infrastructure and code from different revisions. Replace both pins with the same release tag when the runner module publishes a release that raises its AzureRM floor to 5.6.0 or newer.
+**Runner source version.** This demo intentionally follows `github-runners@main` for rapid end-to-end iteration. Terraform resolves `main` during initialization, and the workflow uses that exact resolved commit for the module-owned runner image and scaler Function so one run cannot mix revisions if `main` advances between stages. Production consumers should pin a tested release tag.
 
 **Service Bus namespace stuck in `Failed`.** The runner root uses AzureRM `~> 5.7.0`; AzureRM 5.6.0 moved Service Bus to control-plane API `2026-01-01`. Keep the module's Basic SKU, TLS 1.2, and disabled local authentication. Do not add `zone_redundant` or change to Premium: Azure automatically enables zone redundancy for every tier in supported regions. The provider upgrade prevents the known 5.4.x API boundary from being reused, but only a clean namespace deployment can confirm the diagnosis. A namespace already in `Failed` with `CreateNamespacePayloadDiffersFromExistingNamespaceInFailedState` must be explicitly deleted after approval and shown absent before applying again; retries cannot repair it.

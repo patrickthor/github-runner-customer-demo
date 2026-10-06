@@ -57,12 +57,11 @@ concurrency:
 env:
   # Adjust this path to where your Terraform config lives
   TF_WORKING_DIR: examples/runner-demo
-  # One immutable revision for both the Terraform module and scaler Function.
-  # A checkout-time guard below fails if main.tf and this value diverge.
-  # Replace both with the next release tag once the module publishes one with an
-  # AzureRM >= 5.6.0 provider floor.
+  # This demo intentionally follows main for rapid end-to-end iteration. The
+  # checkout-time guard below keeps Terraform, scaler code, and image source on
+  # that same ref. Production consumers should replace all three with a release.
   MODULE_REPO: patrickthor/github-runners
-  MODULE_REF: 916e8d08874cc1df596a5fd391228d56cba865f1
+  MODULE_REF: main
 
 jobs:
   # ----------------------------------------------------------------------------
@@ -81,6 +80,7 @@ jobs:
     outputs:
       function_app_name: ${{ steps.tf-output.outputs.function_app_name }}
       resource_group: ${{ steps.tf-output.outputs.resource_group_name }}
+      module_commit: ${{ steps.module-source.outputs.commit }}
 
     defaults:
       run:
@@ -218,6 +218,19 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false -backend-config=backend.hcl
 
+      # The demo follows main between runs, but one run must not mix commits if
+      # main advances between Terraform init, image build, and scaler download.
+      - name: Resolve module commit for this run
+        id: module-source
+        run: |
+          COMMIT=$(git -C .terraform/modules/runners rev-parse HEAD)
+          if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve the github-runners commit downloaded by Terraform."
+            exit 1
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "This run uses github-runners@$COMMIT"
+
       - name: Terraform validate
         run: terraform validate
 
@@ -253,19 +266,37 @@ jobs:
         if: inputs.action == 'apply' || inputs.action == 'destroy'
         run: terraform apply -auto-approve -input=false tfplan
 
-      # Build the repository-owned image rather than importing an upstream
-      # `latest` tag. The Dockerfile pins the upstream amd64 digest and adds the
-      # Microsoft-signed Azure CLI package required by Azure/OIDC workloads.
-      - name: Build runner image in ACR
+      # The Dockerfile is part of the same github-runners revision as the
+      # Terraform module and scaler Function. This consumer only fetches that
+      # source and builds it into its private ACR; it does not redefine the image.
+      - name: Build module-owned runner image in ACR
         if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          IMAGE_SOURCE="$RUNNER_TEMP/github-runners-image"
+          mkdir -p "$IMAGE_SOURCE"
+
+          curl -sSL --fail \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            --output "$IMAGE_SOURCE/github-runners.tar.gz" \
+            "https://github.com/${MODULE_REPO}/archive/${{ steps.module-source.outputs.commit }}.tar.gz"
+
+          tar xzf "$IMAGE_SOURCE/github-runners.tar.gz" \
+            --strip-components=1 -C "$IMAGE_SOURCE"
+
+          if [ ! -f "$IMAGE_SOURCE/runner-image/Dockerfile" ]; then
+            echo "::error::runner-image/Dockerfile was not found at ${MODULE_REPO}@${{ steps.module-source.outputs.commit }}."
+            exit 1
+          fi
+
           ACR_SERVER=$(terraform output -raw acr_login_server)
           ACR_NAME=$(echo "$ACR_SERVER" | cut -d. -f1)
           az acr build \
             --registry "$ACR_NAME" \
             --image actions-runner:latest \
             --file Dockerfile \
-            "$GITHUB_WORKSPACE/runner-image"
+            "$IMAGE_SOURCE/runner-image"
 
       # --------------------------------------------------------------------------
       # State container for jobs that run ON the runners (storage-demo).
@@ -362,11 +393,11 @@ jobs:
         run: |
           curl -sSL --fail \
             -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://github.com/${{ env.MODULE_REPO }}/archive/${{ env.MODULE_REF }}.tar.gz" \
+            "https://github.com/${{ env.MODULE_REPO }}/archive/${{ needs.infra.outputs.module_commit }}.tar.gz" \
             | tar xz --wildcards --strip-components=1 -C . "*/scaler-function"
 
           if [ ! -d scaler-function ]; then
-            echo "::error::scaler-function not found after extracting ${{ env.MODULE_REF }} from ${{ env.MODULE_REPO }}. Check that the pinned commit or tag exists."
+            echo "::error::scaler-function not found at ${{ env.MODULE_REPO }}@${{ needs.infra.outputs.module_commit }}."
             exit 1
           fi
 

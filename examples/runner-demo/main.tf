@@ -6,11 +6,11 @@
 # ==============================================================================
 
 module "runners" {
-  # Pinned to the current immutable module revision. Keep this value byte-for-byte
-  # aligned with MODULE_REF in deploy-runners.yml so the infrastructure and the
-  # scaler Function code always come from the same source tree. Replace both with
-  # the next published release tag once the module raises its AzureRM floor.
-  source = "github.com/patrickthor/github-runners//modules/runners?ref=916e8d08874cc1df596a5fd391228d56cba865f1"
+  # This is a demo environment and intentionally follows main for rapid
+  # end-to-end iteration. deploy-runners.yml uses the same ref for the scaler
+  # Function and module-owned runner image, and fails if the refs diverge.
+  # Production consumers should pin a tested release tag.
+  source = "github.com/patrickthor/github-runners//modules/runners?ref=main"
 
   # Core naming — generates all resource names automatically
   workload    = var.workload

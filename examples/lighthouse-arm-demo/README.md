@@ -14,7 +14,7 @@ The Lighthouse module owns the authoritative nested schema and validation. It al
 
 ## Publishing
 
-Run `deploy-runners.yml` with `action = apply` first. It builds `runner-image/Dockerfile` into ACR as `actions-runner:latest`; that repository-owned image contains Azure CLI. Existing ACI jobs are ephemeral, so the next queued job pulls the rebuilt image. The publishing workflow fails before login with a targeted message if an older image without `az` is still being used.
+Run `deploy-runners.yml` with `action = apply` first. It fetches `runner-image/Dockerfile` from `github-runners@main`—the same ref used for Terraform and the scaler Function—and builds it into the private ACR as `actions-runner:latest`. Existing ACI jobs are ephemeral, so the next queued job pulls the rebuilt module-owned image with Azure CLI. The publishing workflow fails before login with a targeted message if an older image without `az` is still being used.
 
 Then run **Actions → Publish Lighthouse ARM Artifacts**.
 
