@@ -44,7 +44,7 @@ A third input, **`deploy_access_reviews`**, is a checkbox rather than a dropdown
 
 `storage-demo` authenticates as the runner's managed identity rather than OIDC on purpose — it exists to prove what *the runner* can do, so using a federated identity would pass even with the runner identity broken.
 
-**Order matters:** run `deploy-runners.yml` with `apply` first. It creates the shared storage account and state containers. The Lighthouse publishing workflow creates its own private artifact container on first publish; it refuses to reuse either Terraform-state container.
+**Order matters:** run `deploy-runners.yml` with `apply` first. It creates the shared Terraform-state account and runner state containers. The Lighthouse publishing workflow separately creates and manages its dedicated artifact storage account; it refuses to use `STATE_STORAGE_ACCOUNT` as the artifact destination.
 
 > `access-vending-demo` and the Lighthouse publisher prefer the optional dedicated OIDC identity in `AZURE_VENDING_CLIENT_ID`, and otherwise reuse `AZURE_CLIENT_ID`. The selected identity needs the permissions documented by each example.
 
@@ -142,9 +142,13 @@ Open **Settings → Secrets and variables → Actions → Variables** and add:
 | `RUNNER_WORKLOAD_ROLES` | `Contributor` | Comma-separated Azure roles for runner identity (optional) |
 | `STATE_RESOURCE_GROUP` | `rg-tfstate` | Resource group for state storage (created automatically if missing) |
 | `STATE_STORAGE_ACCOUNT` | `sttfstate1a2b` | Storage account name for Terraform state (created automatically if missing) |
-| `STATE_CONTAINER` | `tfstate` | Blob container for the platform and access-vending state (optional, defaults to tfstate) |
-| `RUNNER_STATE_CONTAINER` | `runner-jobs-tfstate` | Blob container for state written *by jobs on the runners* (optional). Kept separate so the shared runner identity cannot read the other state files |
-| `LIGHTHOUSE_ARTIFACT_CONTAINER` | `lighthouse-artifacts` | Private container for immutable customer ARM JSON (optional). Must differ from both state containers |
+| `STATE_CONTAINER` | `tfstate` | Blob container for Terraform state (optional, defaults to `tfstate`) |
+| `STATE_SUBSCRIPTION_ID` | subscription UUID | Subscription containing the state account when different from the deployment subscription (optional) |
+| `RUNNER_STATE_CONTAINER` | `runner-jobs-tfstate` | State written by jobs on runners; isolated from platform/governance state |
+| `LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID` | subscription UUID | Subscription for dedicated Lighthouse artifact storage (optional; defaults to `AZURE_SUBSCRIPTION_ID`) |
+| `LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP` | `rg-lighthouse-artifacts` | Dedicated artifact resource group |
+| `LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT` | `stlighthouse1a2b` | Globally unique dedicated artifact account; must differ from `STATE_STORAGE_ACCOUNT` |
+| `LIGHTHOUSE_ARTIFACT_CONTAINER` | `lighthouse-artifacts` | Private customer-artifact container (optional) |
 
 ### 4. Run the deploy workflow
 

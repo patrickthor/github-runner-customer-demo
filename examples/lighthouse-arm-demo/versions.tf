@@ -1,19 +1,26 @@
 terraform {
   required_version = ">= 1.9, < 2.0"
 
+  # State for the dedicated artifact account lives in the existing internal
+  # Terraform backend under its own key. Artifact blobs never use that account.
+  backend "azurerm" {}
+
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 5.4.0"
     }
+
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.14.0"
+    }
   }
 }
 
-# AzureRM is required statically by the dual-mode Lighthouse module even though
-# ARM mode creates and reads no Azure resources. The workflow authenticates this
-# provider to the subscription containing the artifact storage account.
 provider "azurerm" {
   features {}
 
-  subscription_id = var.artifact_storage_subscription_id
+  subscription_id     = var.artifact_storage_subscription_id
+  storage_use_azuread = true
 }

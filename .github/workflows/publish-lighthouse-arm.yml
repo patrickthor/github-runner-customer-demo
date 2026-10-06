@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Validate only, or publish immutable ARM artifacts"
+        description: "Validate only, or provision storage and publish artifacts"
         required: true
         default: plan
         type: choice
@@ -43,9 +43,14 @@ jobs:
       ARM_USE_MSI: false
       ARM_CLIENT_ID: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+
       TF_VAR_managing_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
-      TF_VAR_artifact_storage_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_artifact_storage_subscription_id: ${{ vars.LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_artifact_storage_resource_group_name: ${{ vars.LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP }}
+      TF_VAR_artifact_storage_account_name: ${{ vars.LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT }}
+      TF_VAR_artifact_storage_container_name: ${{ vars.LIGHTHOUSE_ARTIFACT_CONTAINER || 'lighthouse-artifacts' }}
+      TF_VAR_artifact_storage_location: ${{ vars.AZURE_LOCATION }}
 
     steps:
       - name: Checkout
@@ -64,7 +69,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_VENDING_CLIENT_ID || secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          subscription-id: ${{ vars.LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -92,26 +97,52 @@ jobs:
           echo "TF_VAR_artifact_version=$VERSION" >> "$GITHUB_ENV"
           echo "LIGHTHOUSE_ARTIFACT_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Check governance record
+      - name: Check governance and storage configuration
+        env:
+          STATE_RG: ${{ vars.STATE_RESOURCE_GROUP }}
+          STATE_SA: ${{ vars.STATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
+          STATE_SUBSCRIPTION_ID: ${{ vars.STATE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           if [ ! -f terraform.tfvars ]; then
             echo "::error::terraform.tfvars is missing. It is the committed Lighthouse governance record."
             exit 1
           fi
+          if [ -z "$STATE_RG" ] || [ -z "$STATE_SA" ] || [ -z "$STATE_SUBSCRIPTION_ID" ]; then
+            echo "::error::STATE_RESOURCE_GROUP, STATE_STORAGE_ACCOUNT and a state subscription ID must be configured."
+            exit 1
+          fi
+          if [ -z "$TF_VAR_artifact_storage_resource_group_name" ] || [ -z "$TF_VAR_artifact_storage_account_name" ] || [ -z "$TF_VAR_artifact_storage_location" ]; then
+            echo "::error::LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP, LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT and AZURE_LOCATION must be configured."
+            exit 1
+          fi
+          if [ "$TF_VAR_artifact_storage_account_name" = "$STATE_SA" ]; then
+            echo "::error::LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT must differ from STATE_STORAGE_ACCOUNT."
+            exit 1
+          fi
+
+          cat > backend.hcl <<EOF
+          resource_group_name  = "$STATE_RG"
+          storage_account_name = "$STATE_SA"
+          container_name       = "$STATE_CONTAINER"
+          key                  = "lighthouse-artifacts.tfstate"
+          subscription_id      = "$STATE_SUBSCRIPTION_ID"
+          use_azuread_auth     = true
+          use_oidc             = true
+          EOF
 
       - name: Terraform format
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        run: terraform init -backend=false -input=false
+        run: terraform init -reconfigure -input=false -backend-config=backend.hcl
 
       - name: Terraform validate
         run: terraform validate
 
       - name: Terraform plan
         run: |
-          # The ARM templates are identifiers and policy rather than credentials,
-          # but they are customer artifacts, not useful workflow-log content.
+          # Generated ARM templates are customer artifacts, not useful log data.
           if ! terraform plan -input=false -out=tfplan > plan.log 2>&1; then
             cat plan.log
             exit 1
@@ -122,46 +153,51 @@ jobs:
         run: |
           COUNT=$(terraform show -json tfplan | jq -r '.planned_values.outputs.customer_count.value // 0')
           {
-            echo "### Lighthouse ARM artifact plan"
+            echo "### Lighthouse artifact-storage and ARM plan"
             echo ""
             echo "Customer templates: **$COUNT**"
             echo "Artifact version: \`$LIGHTHOUSE_ARTIFACT_VERSION\`"
+            echo "Artifact account: \`$TF_VAR_artifact_storage_account_name\`"
+            echo "Artifact container: \`$TF_VAR_artifact_storage_container_name\`"
+            echo "State remains in: \`${{ vars.STATE_STORAGE_ACCOUNT }}/${{ vars.STATE_CONTAINER || 'tfstate' }}/lighthouse-artifacts.tfstate\`"
             echo ""
-            echo "This root is fixed to ARM rendering and plans no customer Lighthouse resources."
+            echo "The Lighthouse module is fixed to ARM rendering; no customer subscription is changed."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Materialize deterministic outputs
+      - name: Provision dedicated storage and materialize outputs
         if: inputs.action == 'publish'
         run: |
           if ! terraform apply -auto-approve -input=false tfplan > apply.log 2>&1; then
             cat apply.log
             exit 1
           fi
-          echo "Terraform outputs materialized; rendered templates were not printed."
+          echo "Dedicated artifact storage is ready; rendered templates were not printed."
 
       - name: Publish immutable templates
         if: inputs.action == 'publish'
-        env:
-          STORAGE_ACCOUNT: ${{ vars.STATE_STORAGE_ACCOUNT }}
-          ARTIFACT_CONTAINER: ${{ vars.LIGHTHOUSE_ARTIFACT_CONTAINER || 'lighthouse-artifacts' }}
-          STATE_CONTAINER: ${{ vars.STATE_CONTAINER || 'tfstate' }}
-          RUNNER_STATE_CONTAINER: ${{ vars.RUNNER_STATE_CONTAINER || 'runner-jobs-tfstate' }}
         run: |
-          if [ -z "$STORAGE_ACCOUNT" ]; then
-            echo "::error::STATE_STORAGE_ACCOUNT must identify the remote artifact storage account."
-            exit 1
-          fi
-          if [ "$ARTIFACT_CONTAINER" = "$STATE_CONTAINER" ] || [ "$ARTIFACT_CONTAINER" = "$RUNNER_STATE_CONTAINER" ]; then
-            echo "::error::LIGHTHOUSE_ARTIFACT_CONTAINER must be separate from both Terraform state containers."
-            exit 1
-          fi
+          STORAGE_ACCOUNT=$(terraform output -raw artifact_storage_account_name)
+          ARTIFACT_CONTAINER=$(terraform output -raw artifact_storage_container_name)
+          CONTAINER_URL=$(terraform output -raw artifact_container_url)
 
-          az storage container create \
-            --name "$ARTIFACT_CONTAINER" \
-            --account-name "$STORAGE_ACCOUNT" \
-            --auth-mode login \
-            --public-access off \
-            --output none
+          READY=false
+          for attempt in $(seq 1 12); do
+            if az storage blob list \
+              --account-name "$STORAGE_ACCOUNT" \
+              --container-name "$ARTIFACT_CONTAINER" \
+              --auth-mode login \
+              --num-results 1 \
+              --output none 2>/dev/null; then
+              READY=true
+              break
+            fi
+            echo "Artifact data-plane RBAC not ready ($attempt/12); retrying in 10s..."
+            sleep 10
+          done
+          if [ "$READY" != "true" ]; then
+            echo "::error::The publishing identity cannot access $STORAGE_ACCOUNT/$ARTIFACT_CONTAINER after 120 seconds. Check Storage Blob Data Contributor propagation."
+            exit 1
+          fi
 
           OUTPUT_DIR="$RUNNER_TEMP/lighthouse-arm"
           mkdir -p "$OUTPUT_DIR"
@@ -174,6 +210,15 @@ jobs:
             echo "No artifacts published because \`customers = {}\`." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
+          {
+            echo "### Published Lighthouse ARM artifacts"
+            echo ""
+            echo "Storage account: \`$STORAGE_ACCOUNT\`"
+            echo "Private container: \`$ARTIFACT_CONTAINER\`"
+            echo "Container URL: \`$CONTAINER_URL\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
           while IFS= read -r CUSTOMER; do
             FILE="$OUTPUT_DIR/${CUSTOMER}-lighthouse.json"
@@ -215,9 +260,12 @@ jobs:
               echo "Published $BLOB_NAME"
             fi
 
+            BLOB_URL="${CONTAINER_URL}/${BLOB_NAME}"
             {
               echo "- \`$BLOB_NAME\`"
+              echo "  - Private URL: \`$BLOB_URL\`"
               echo "  - SHA-256: \`$EXPECTED_SHA\`"
+              echo "  - Download: \`az storage blob download --account-name $STORAGE_ACCOUNT --container-name $ARTIFACT_CONTAINER --name $BLOB_NAME --file lighthouse.json --auth-mode login\`"
             } >> "$GITHUB_STEP_SUMMARY"
           done < <(jq -r 'keys[]' "$OUTPUT_DIR/templates.json")
 
