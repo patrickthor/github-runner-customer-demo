@@ -44,7 +44,7 @@ Repository variables:
 
 | Variable | Required | Purpose |
 |---|---:|---|
-| `LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT` | yes | Globally unique dedicated storage account name |
+| `LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT_PREFIX` | no | Storage account prefix; defaults to `azlhartifacts`, with a stable random 8-character suffix |
 | `LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP` | yes | Dedicated artifact resource group |
 | `LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID` | no | Artifact subscription; defaults to `AZURE_SUBSCRIPTION_ID` |
 | `LIGHTHOUSE_ARTIFACT_CONTAINER` | no | Private container; defaults to `lighthouse-artifacts` |
@@ -54,7 +54,7 @@ Repository variables:
 | `STATE_CONTAINER` | no | Backend container; defaults to `tfstate` |
 | `STATE_SUBSCRIPTION_ID` | no | Backend subscription; defaults to `AZURE_SUBSCRIPTION_ID` |
 
-`LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT` must differ from `STATE_STORAGE_ACCOUNT`; the workflow fails before Terraform initialization if they match.
+Terraform generates the full globally unique account name as `<prefix><8 random lowercase alphanumeric characters>`. The suffix is stored in `lighthouse-artifacts.tfstate`, so it remains stable across runs. Losing that state causes a new name to be generated.
 
 The selected OIDC identity needs:
 

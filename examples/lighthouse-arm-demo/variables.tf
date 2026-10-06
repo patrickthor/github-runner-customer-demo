@@ -18,13 +18,14 @@ variable "artifact_storage_resource_group_name" {
   }
 }
 
-variable "artifact_storage_account_name" {
-  description = "Globally unique name of the dedicated Lighthouse artifact storage account. Supplied by CI."
+variable "artifact_storage_account_name_prefix" {
+  description = "Prefix for the dedicated artifact storage account. Terraform appends a stable 8-character random suffix."
   type        = string
+  default     = "azlhartifacts"
 
   validation {
-    condition     = can(regex("^[a-z0-9]{3,24}$", var.artifact_storage_account_name))
-    error_message = "artifact_storage_account_name must contain 3-24 lowercase letters or numbers."
+    condition     = can(regex("^[a-z0-9]{3,16}$", var.artifact_storage_account_name_prefix))
+    error_message = "artifact_storage_account_name_prefix must contain 3-16 lowercase letters or numbers."
   }
 }
 

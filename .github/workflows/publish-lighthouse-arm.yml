@@ -48,7 +48,7 @@ jobs:
       TF_VAR_managing_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
       TF_VAR_artifact_storage_subscription_id: ${{ vars.LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
       TF_VAR_artifact_storage_resource_group_name: ${{ vars.LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP }}
-      TF_VAR_artifact_storage_account_name: ${{ vars.LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT }}
+      TF_VAR_artifact_storage_account_name_prefix: ${{ vars.LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT_PREFIX || 'azlhartifacts' }}
       TF_VAR_artifact_storage_container_name: ${{ vars.LIGHTHOUSE_ARTIFACT_CONTAINER || 'lighthouse-artifacts' }}
       TF_VAR_artifact_storage_location: ${{ vars.AZURE_LOCATION }}
 
@@ -112,12 +112,8 @@ jobs:
             echo "::error::STATE_RESOURCE_GROUP, STATE_STORAGE_ACCOUNT and a state subscription ID must be configured."
             exit 1
           fi
-          if [ -z "$TF_VAR_artifact_storage_resource_group_name" ] || [ -z "$TF_VAR_artifact_storage_account_name" ] || [ -z "$TF_VAR_artifact_storage_location" ]; then
-            echo "::error::LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP, LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT and AZURE_LOCATION must be configured."
-            exit 1
-          fi
-          if [ "$TF_VAR_artifact_storage_account_name" = "$STATE_SA" ]; then
-            echo "::error::LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT must differ from STATE_STORAGE_ACCOUNT."
+          if [ -z "$TF_VAR_artifact_storage_resource_group_name" ] || [ -z "$TF_VAR_artifact_storage_location" ]; then
+            echo "::error::LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP and AZURE_LOCATION must be configured."
             exit 1
           fi
 
@@ -157,7 +153,7 @@ jobs:
             echo ""
             echo "Customer templates: **$COUNT**"
             echo "Artifact version: \`$LIGHTHOUSE_ARTIFACT_VERSION\`"
-            echo "Artifact account: \`$TF_VAR_artifact_storage_account_name\`"
+            echo "Artifact account prefix: \`$TF_VAR_artifact_storage_account_name_prefix\` (Terraform appends a stable 8-character suffix)"
             echo "Artifact container: \`$TF_VAR_artifact_storage_container_name\`"
             echo "State remains in: \`${{ vars.STATE_STORAGE_ACCOUNT }}/${{ vars.STATE_CONTAINER || 'tfstate' }}/lighthouse-artifacts.tfstate\`"
             echo ""

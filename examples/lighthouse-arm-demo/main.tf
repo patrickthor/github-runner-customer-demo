@@ -1,3 +1,11 @@
+resource "random_string" "storage_suffix" {
+  length  = 8
+  upper   = false
+  lower   = true
+  numeric = true
+  special = false
+}
+
 data "azurerm_client_config" "current" {}
 
 # Artifact delivery has a different audience and lifecycle from Terraform state,
@@ -15,7 +23,7 @@ resource "azurerm_resource_group" "artifacts" {
 }
 
 resource "azurerm_storage_account" "artifacts" {
-  name                     = var.artifact_storage_account_name
+  name                     = "${var.artifact_storage_account_name_prefix}${random_string.storage_suffix.result}"
   resource_group_name      = azurerm_resource_group.artifacts.name
   location                 = azurerm_resource_group.artifacts.location
   account_tier             = "Standard"

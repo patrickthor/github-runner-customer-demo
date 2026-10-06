@@ -147,7 +147,7 @@ Open **Settings → Secrets and variables → Actions → Variables** and add:
 | `RUNNER_STATE_CONTAINER` | `runner-jobs-tfstate` | State written by jobs on runners; isolated from platform/governance state |
 | `LIGHTHOUSE_ARTIFACT_SUBSCRIPTION_ID` | subscription UUID | Subscription for dedicated Lighthouse artifact storage (optional; defaults to `AZURE_SUBSCRIPTION_ID`) |
 | `LIGHTHOUSE_ARTIFACT_RESOURCE_GROUP` | `rg-lighthouse-artifacts` | Dedicated artifact resource group |
-| `LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT` | `stlighthouse1a2b` | Globally unique dedicated artifact account; must differ from `STATE_STORAGE_ACCOUNT` |
+| `LIGHTHOUSE_ARTIFACT_STORAGE_ACCOUNT_PREFIX` | `azlhartifacts` | Optional 3-16 character prefix; Terraform appends a stable random 8-character suffix |
 | `LIGHTHOUSE_ARTIFACT_CONTAINER` | `lighthouse-artifacts` | Private customer-artifact container (optional) |
 
 ### 4. Run the deploy workflow
