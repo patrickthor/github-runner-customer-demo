@@ -19,13 +19,13 @@
 #     GH_ORG                — e.g. your-org
 #     GH_REPO               — e.g. your-org/your-repo
 #     RUNNER_WORKLOAD_ROLES — Comma-separated Azure roles for runner identity (optional)
+#     STATE_RESOURCE_GROUP  — Resource group for state storage (created if missing)
+#     STATE_STORAGE_ACCOUNT — Storage account name for Terraform state (created if missing)
+#     STATE_CONTAINER       — Blob container name (optional, default: tfstate)
 #
 #   Source revision:
 #     The Terraform module and scaler archive are pinned together in this file
 #     and examples/runner-demo/main.tf. Do not configure them independently.
-#     STATE_RESOURCE_GROUP  — Resource group for state storage (created if missing)
-#     STATE_STORAGE_ACCOUNT — Storage account name for Terraform state (created if missing)
-#     STATE_CONTAINER       — Blob container name (optional, default: tfstate)
 # ==============================================================================
 
 name: Deploy Runners
@@ -253,16 +253,19 @@ jobs:
         if: inputs.action == 'apply' || inputs.action == 'destroy'
         run: terraform apply -auto-approve -input=false tfplan
 
-      - name: Import runner image into ACR
+      # Build the repository-owned image rather than importing an upstream
+      # `latest` tag. The Dockerfile pins the upstream amd64 digest and adds the
+      # Microsoft-signed Azure CLI package required by Azure/OIDC workloads.
+      - name: Build runner image in ACR
         if: inputs.action == 'apply'
         run: |
           ACR_SERVER=$(terraform output -raw acr_login_server)
           ACR_NAME=$(echo "$ACR_SERVER" | cut -d. -f1)
-          az acr import \
-            --name "$ACR_NAME" \
-            --source ghcr.io/myoung34/docker-github-actions-runner:latest \
+          az acr build \
+            --registry "$ACR_NAME" \
             --image actions-runner:latest \
-            --force
+            --file Dockerfile \
+            "$GITHUB_WORKSPACE/runner-image"
 
       # --------------------------------------------------------------------------
       # State container for jobs that run ON the runners (storage-demo).

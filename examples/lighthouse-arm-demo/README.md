@@ -14,7 +14,9 @@ The Lighthouse module owns the authoritative nested schema and validation. It al
 
 ## Publishing
 
-Run **Actions → Publish Lighthouse ARM Artifacts**.
+Run `deploy-runners.yml` with `action = apply` first. It builds `runner-image/Dockerfile` into ACR as `actions-runner:latest`; that repository-owned image contains Azure CLI. Existing ACI jobs are ephemeral, so the next queued job pulls the rebuilt image. The publishing workflow fails before login with a targeted message if an older image without `az` is still being used.
+
+Then run **Actions → Publish Lighthouse ARM Artifacts**.
 
 - `plan` validates and previews rendering without uploading.
 - `publish` renders and uploads immutable blobs.

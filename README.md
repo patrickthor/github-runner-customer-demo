@@ -10,6 +10,7 @@ This repository demonstrates the GitHub runners platform, a two-module Entra ide
 │   ├── storage-demo/                        # Self-hosted runner test
 │   ├── access-vending-demo/                 # Entra groups + PIM + access packages
 │   └── lighthouse-arm-demo/                 # Parameter-free Lighthouse ARM rendering
+├── runner-image/                            # Pinned self-hosted image + Azure CLI
 ├── docs/steering/                           # Module implementation guidance
 └── .github/workflows/
     ├── deploy-runners.yml                   # Runner platform
@@ -157,8 +158,10 @@ The workflow is fully self-service. On the first run it will:
 - Grant the CI identity `Storage Blob Data Contributor` on the storage account
 - Generate `terraform.tfvars` and `backend.hcl` from your GitHub variables
 - Run `terraform apply` (infrastructure)
-- Import the runner container image into ACR
+- Build the repository-owned runner image in ACR from `runner-image/Dockerfile`
 - Deploy the scaler function code (fetched from the module repo)
+
+The runner Dockerfile pins the upstream Linux/amd64 image digest and adds a pinned Azure CLI package from Microsoft’s signed apt repository. This keeps Azure workloads on the ephemeral self-hosted ACI runners without downloading privileged tooling during each job. After changing the Dockerfile or rebuilding the runner platform, run `deploy-runners.yml` with `apply` before starting workflows that require `az`.
 
 Subsequent runs skip the storage creation and just connect to the existing state.
 

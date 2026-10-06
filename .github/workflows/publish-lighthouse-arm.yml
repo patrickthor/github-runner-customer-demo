@@ -27,6 +27,8 @@ concurrency:
 jobs:
   publish:
     name: Lighthouse ARM (${{ inputs.action }})
+    # Runs inside the ephemeral ACI runner pool. deploy-runners.yml builds the
+    # repository-owned runner image with Azure CLI before this workflow can run.
     runs-on:
       - self-hosted
       - azure
@@ -48,6 +50,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify self-hosted runner toolchain
+        run: |
+          if ! command -v az >/dev/null 2>&1; then
+            echo "::error::Azure CLI is missing from the self-hosted runner image. Run Deploy Runners with action=apply to rebuild actions-runner:latest from runner-image/Dockerfile, then retry this workflow."
+            exit 1
+          fi
+          az version --output json
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
