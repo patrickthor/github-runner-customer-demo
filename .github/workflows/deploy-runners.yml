@@ -292,11 +292,17 @@ jobs:
 
           ACR_SERVER=$(terraform output -raw acr_login_server)
           ACR_NAME=$(echo "$ACR_SERVER" | cut -d. -f1)
-          az acr build \
-            --registry "$ACR_NAME" \
-            --image actions-runner:latest \
-            --file Dockerfile \
-            "$IMAGE_SOURCE/runner-image"
+          # Azure CLI resolves --file relative to the submitted source root. Run
+          # from that root so both Dockerfile and the build context are unambiguous.
+          (
+            cd "$IMAGE_SOURCE/runner-image"
+            az acr build \
+              --registry "$ACR_NAME" \
+              --image actions-runner:latest \
+              --file Dockerfile \
+              --platform linux/amd64 \
+              .
+          )
 
       # --------------------------------------------------------------------------
       # State container for jobs that run ON the runners (storage-demo).
